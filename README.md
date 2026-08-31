@@ -1,68 +1,110 @@
 # Zread Docs for GitHub
 
-> 在 GitHub 仓库页直接阅读 [zread.ai](https://zread.ai) 的 AI 文档。
-> Read [zread.ai](https://zread.ai) AI-generated docs right on any GitHub repository page.
-
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Manifest V3](https://img.shields.io/badge/Manifest-V3-4c9a52)
 ![Chrome Extension](https://img.shields.io/badge/Chrome-Extension-f5c542)
 ![Version](https://img.shields.io/badge/version-2.30.0-informational)
 
-在仓库页左侧生成 zread 文档目录，点击即在 README 区域阅读，无需切换标签。
-A documentation sidebar appears beside the README; click any entry to read in place — no tab switching.
+**中文** · [English](#english)
+
+在 GitHub 仓库页直接阅读 [zread.ai](https://zread.ai) 的 AI 文档：左侧生成文档目录，点击即在 README 区域阅读，无需切换标签。
 
 ---
 
-## ✨ 功能 · Features
+## ✨ 功能
 
-| | |
-|---|---|
-| 📚 **目录侧栏 / TOC sidebar** | 可折叠 section/group，点击在 README 区域阅读 · Collapsible TOC, read in the README area |
-| 🔁 **README 切换 / Restore** | 点原生 `README` 标签恢复原始内容 · Click the native tab to restore the README |
-| ⚡ **缓存 + 预取 / Cache & prefetch** | ≤50MB LRU 本地缓存，后台串行预取，二次秒开 · Local LRU cache + serial prefetch |
-| 🤖 **自动收录/刷新 / Auto index & refresh** | 未收录自动提交并显示排队 ETA；超 7 天自动刷新；刷新中仍展示旧文档 · Auto-submit with queue ETA; auto-refresh; keep old docs while refreshing |
-| 🧩 **代码复制 / Copy code** | 仿 GitHub 的代码块复制按钮 · GitHub-style copy button on code blocks |
-| 📊 **Mermaid / Diagrams** | 渲染流程图 + 全屏预览（缩放/拖动/重置），按需分包加载 · Rendered diagrams with a fullscreen viewer, loaded on demand |
-| 🌙 **暗色模式 / Dark mode** | 跟随系统 `prefers-color-scheme` · Follows system preference |
-| 🌐 **国际化 / i18n** | 浏览器为中文时显示中文，否则英文（界面+内容） · Chinese only when the browser is Chinese, else English |
+- 📚 **目录侧栏**：仓库页左侧显示 zread 文档目录（可折叠 section/group），点击在 README 区域阅读。
+- 🔁 **README 切换**：点击 GitHub 原生 `README` 标签恢复原始内容。
+- ⚡ **缓存 + 预取**：目录/文档本地缓存（≤50MB、LRU），后台串行预取，二次打开秒开。
+- 🤖 **自动收录/刷新**：未收录自动提交并显示排队 ETA；收录超 7 天自动刷新；刷新中仍展示旧文档。
+- 🧩 **代码复制**：为渲染的代码块添加仿 GitHub 的复制按钮。
+- 📊 **Mermaid 图表**：渲染流程图，支持全屏预览（缩放/拖动/重置），按需分包加载。
+- 🌙 **暗色模式**：跟随系统 `prefers-color-scheme`。
+- 🌐 **国际化**：浏览器为中文时显示中文，否则英文（界面与内容均跟随）。
 
-## 🚀 开始 · Getting Started
+## 🚀 开始
 
-**要求 / Requirements**：Node.js ≥ 18，Chrome（开发者模式）。
+**要求**：Node.js ≥ 18，Chrome（开发者模式）。
 
 ```bash
-# 安装依赖 / install
-npm install
-
-# 开发：自动打开带扩展的 Chrome / dev: launches Chrome with the extension
-npm run dev
-
-# 构建到 dist/chromium / build
-npm run build
+npm install        # 安装依赖
+npm run dev        # 开发：自动打开带扩展的 Chrome
+npm run build      # 构建到 dist/chromium
 ```
 
-**加载 / Load unpacked**
+**加载到 Chrome**
 
-1. 打开 `chrome://extensions`，开启 **开发者模式** · Open `chrome://extensions`, enable **Developer mode**.
-2. 点击 **加载已解压的扩展程序**，选择 `dist/chromium` · Click **Load unpacked**, select `dist/chromium`.
-3. 打开任意仓库页，如 `https://github.com/owner/repo`（带/不带尾斜杠均可）· Open any repo page.
+1. 打开 `chrome://extensions`，开启 **开发者模式**。
+2. 点击 **加载已解压的扩展程序**，选择 `dist/chromium`。
+3. 打开任意仓库页，如 `https://github.com/owner/repo`（带/不带尾斜杠均可）。
 
-## 🧩 原理简述 · How it works
+## 🧩 原理简述
 
-- **Content script** 在 GitHub 仓库页注入左侧目录，复用 README 容器渲染文档。
-- **Service worker** 负责请求 zread.ai（目录/正文/状态/ETA），直连优先、页面代理兜底，并管理缓存与预取。
-- **Mermaid** 单独打包，仅在检测到图表时按需注入，控制主包体积。
+- **Content script**：在 GitHub 仓库页注入左侧目录，复用 README 容器渲染文档。
+- **Service worker**：请求 zread.ai（目录/正文/状态/ETA），直连优先、页面代理兜底，管理缓存与预取。
+- **Mermaid**：单独打包，仅在检测到图表时按需注入，控制主包体积。
 
-## 🤝 贡献 · Contributing
+## 🤝 贡献
 
-欢迎 issue / PR。重大改动请先开 issue 讨论。
+欢迎 issue / PR；重大改动请先开 issue 讨论。
+
+## 🙏 致谢
+
+- [zread.ai](https://zread.ai) — GitHub 仓库 AI 文档生成。
+- [Extension.js](https://extension.js.org) — MV3 + React + TS 构建框架。
+
+## 📄 许可
+
+[MIT](LICENSE) © 2026 ejfkdev
+
+---
+
+# English
+
+Read [zread.ai](https://zread.ai) AI-generated documentation right on any GitHub repository page: a documentation sidebar appears beside the README, and clicking an entry renders the doc in the README area — no tab switching.
+
+## ✨ Features
+
+- 📚 **TOC sidebar**: collapsible section/group table of contents on the repo page, read in the README area.
+- 🔁 **Restore README**: click the native `README` tab to bring back the original content.
+- ⚡ **Cache & prefetch**: local LRU cache (≤50MB) with background serial prefetch for instant re-open.
+- 🤖 **Auto index & refresh**: auto-submit unlisted repos (with queue ETA), auto-refresh after 7 days, keep showing old docs while refreshing.
+- 🧩 **Copy code**: GitHub-style copy button on rendered code blocks.
+- 📊 **Mermaid**: renders diagrams with a fullscreen viewer (zoom/pan/reset), loaded on demand.
+- 🌙 **Dark mode**: follows system `prefers-color-scheme`.
+- 🌐 **i18n**: Chinese only when the browser language is Chinese, otherwise English (UI + content).
+
+## 🚀 Getting Started
+
+**Requirements**: Node.js ≥ 18, Chrome with Developer mode.
+
+```bash
+npm install        # install dependencies
+npm run dev        # launches Chrome with the extension
+npm run build      # builds to dist/chromium
+```
+
+**Load unpacked**
+
+1. Open `chrome://extensions` and enable **Developer mode**.
+2. Click **Load unpacked** and select `dist/chromium`.
+3. Open any repo page, e.g. `https://github.com/owner/repo` (trailing slash optional).
+
+## 🧩 How it works
+
+- **Content script**: injects the sidebar on GitHub repo pages and renders docs into the README container.
+- **Service worker**: fetches zread.ai (outline/content/status/ETA) with direct-first + page-proxy fallback; manages cache & prefetch.
+- **Mermaid**: bundled separately and injected only when a diagram is present, keeping the main bundle small.
+
+## 🤝 Contributing
+
 Issues and PRs are welcome; please open an issue first for major changes.
 
-## 🙏 致谢 · Acknowledgments
+## 🙏 Acknowledgments
 
-- [zread.ai](https://zread.ai) — AI 文档生成 · AI documentation for GitHub repos.
-- [Extension.js](https://extension.js.org) — MV3 + React + TS 构建框架 · build framework.
+- [zread.ai](https://zread.ai) — AI documentation for GitHub repositories.
+- [Extension.js](https://extension.js.org) — MV3 + React + TS build framework.
 
-## 📄 许可 · License
+## 📄 License
 
 [MIT](LICENSE) © 2026 ejfkdev
