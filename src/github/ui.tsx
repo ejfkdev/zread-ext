@@ -352,46 +352,8 @@ function handleDocumentClick(e: MouseEvent) {
         
         console.log('[zread-ext] README restored (immediate)')
         
-        // 多次延迟恢复，确保在 React 更新之后执行
-        requestAnimationFrame(() => {
-          if (selectedDocSlug === null && originalReadmeHTML !== null) {
-            console.log('[zread-ext] Re-applying restore after rAF')
-            const container = findReadmeContainer()
-            if (container) {
-              container.innerHTML = originalReadmeHTML
-            }
-          }
-        })
-        
-        setTimeout(() => {
-          if (selectedDocSlug === null && originalReadmeHTML !== null) {
-            console.log('[zread-ext] Re-applying restore after 100ms')
-            const container = findReadmeContainer()
-            if (container) {
-              container.innerHTML = originalReadmeHTML
-            }
-          }
-        }, 100)
-        
-        setTimeout(() => {
-          if (selectedDocSlug === null && originalReadmeHTML !== null) {
-            console.log('[zread-ext] Re-applying restore after 300ms')
-            const container = findReadmeContainer()
-            if (container) {
-              container.innerHTML = originalReadmeHTML
-            }
-          }
-        }, 300)
-        
-        setTimeout(() => {
-          if (selectedDocSlug === null && originalReadmeHTML !== null) {
-            console.log('[zread-ext] Re-applying restore after 500ms')
-            const container = findReadmeContainer()
-            if (container) {
-              container.innerHTML = originalReadmeHTML
-            }
-          }
-        }, 500)
+        // 短窗口守护：若 GitHub 重渲染覆盖了恢复结果，自动重新应用
+        guardReadmeRestore()
         
         return false
       }
@@ -400,6 +362,43 @@ function handleDocumentClick(e: MouseEvent) {
     
     tabElement = tabElement.parentElement as HTMLElement
   }
+}
+
+// 恢复 README 后的短窗口守护：
+// GitHub 可能在恢复后继续重渲染并覆盖内容，用 MutationObserver
+// 在有限时间内检测覆盖并重新应用，替代多个固定延时重试（避免竞态）。
+let readmeRestoreGuard: MutationObserver | null = null
+function guardReadmeRestore(durationMs = 1500) {
+  if (readmeRestoreGuard) {
+    readmeRestoreGuard.disconnect()
+    readmeRestoreGuard = null
+  }
+  const container = findReadmeContainer()
+  const watchRoot = container?.parentElement || document.body
+  const deadline = Date.now() + durationMs
+
+  const reapply = () => {
+    if (Date.now() > deadline || selectedDocSlug !== null || originalReadmeHTML === null) {
+      readmeRestoreGuard?.disconnect()
+      readmeRestoreGuard = null
+      return
+    }
+    const c = findReadmeContainer()
+    if (c && c.innerHTML !== originalReadmeHTML) {
+      console.log('[zread-ext] Re-applying README restore (guard)')
+      c.innerHTML = originalReadmeHTML
+    }
+  }
+
+  readmeRestoreGuard = new MutationObserver(() => {
+    // 合并到下一帧处理，避免高频抖动
+    requestAnimationFrame(reapply)
+  })
+  readmeRestoreGuard.observe(watchRoot, { childList: true, subtree: true })
+  window.setTimeout(() => {
+    readmeRestoreGuard?.disconnect()
+    readmeRestoreGuard = null
+  }, durationMs)
 }
 
 // ==========================================
@@ -456,9 +455,6 @@ async function loadDoc(slug: string) {
 
     // 给代码块添加复制按钮（仿 GitHub 原生风格）
     addCodeCopyButtons(container)
-
-    // 处理文档内链接（zread 文件链接跳转）
-    container.addEventListener('click', handleDocLinkClick)
   } catch (err) {
     console.error('[zread-ext] loadDoc error:', err)
     if (err instanceof Error && err.message === 'CF_CHALLENGE') {
@@ -477,17 +473,21 @@ async function loadDoc(slug: string) {
   }
 }
 
-// 文档内链接点击：识别 zread 文件链接并在扩展内跳转
+// 文档内链接点击：仅拦截指向当前仓库的 zread.ai 文档链接，在扩展内跳转。
+// 相对链接已在 fixRelativeLinks 阶段重写为 https://zread.ai/... 绝对地址。
 function handleDocLinkClick(e: MouseEvent) {
+  if (!currentRepo) return
+  // 中键 / 修饰键点击：交给浏览器在新标签打开
+  if (e.button === 1 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
   const link = (e.target as HTMLElement).closest('a')
   if (!link) return
   const href = link.getAttribute('href') || ''
-  // 形如 https://zread.ai/owner/repo/path 或 /owner/repo/path
-  const m = href.match(/(?:https:\/\/zread\.ai)?\/[^/]+\/[^/]+\/(.+?)(?:#|$)/)
-  if (m && m[1]) {
-    e.preventDefault()
-    loadDoc(m[1])
-  }
+  const m = href.match(/^https:\/\/zread\.ai\/([^/]+\/[^/]+)\/(.+?)(?:#|$)/)
+  if (!m) return
+  const repoPrefix = `${currentRepo.owner}/${currentRepo.repo}`.toLowerCase()
+  if (m[1].toLowerCase() !== repoPrefix) return
+  e.preventDefault()
+  loadDoc(m[2])
 }
 
 // ==========================================
@@ -751,16 +751,22 @@ const GitHubUI = {
 
     injectStyles()
 
+    // 文档内 zread 链接拦截：document 级只注册一次
+    document.addEventListener('click', handleDocLinkClick)
+
     // MutationObserver：GitHub SPA 重渲染会移除注入元素，自动恢复
     mutationObserver = new MutationObserver(() => {
       // 检查按钮或 marker 是否被移除
       if ((toggleButton && !toggleButton.isConnected) || 
           (sidebarMarker && !sidebarMarker.isConnected)) {
+        if (docPanelRoot) {
+          docPanelRoot.unmount()
+          docPanelRoot = null
+        }
         toggleButton = null
         sidebarMarker = null
         sidebarOuter = null
         docPanelContainer = null
-        docPanelRoot = null
       }
       
       // 重新创建
@@ -810,6 +816,7 @@ const GitHubUI = {
     
     // 移除 document 级别的点击事件监听器
     document.removeEventListener('click', handleDocumentClick, true)
+    document.removeEventListener('click', handleDocLinkClick)
 
     const style = document.getElementById(STYLE_ID)
     if (style) style.remove()

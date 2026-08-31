@@ -187,6 +187,8 @@ export default function DocPanel({ repo, onDocClick }: DocPanelProps) {
   const query = ''
 
   const handleLinkClick = (e: React.MouseEvent, slug: string) => {
+    // 中键 / Ctrl·Cmd·Shift·Alt + 点击：交给浏览器在新标签打开
+    if (e.button === 1 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
     e.preventDefault()
     e.stopPropagation()
     onDocClick?.(slug)
@@ -302,6 +304,8 @@ export default function DocPanel({ repo, onDocClick }: DocPanelProps) {
                   className="zread-leaf"
                   style={{ '--depth': 0 } as React.CSSProperties}
                   data-slug={item.slug}
+                  target="_blank"
+                  rel="noopener noreferrer"
                 >
                   {ICON_DOC} {item.title}
                 </a>
@@ -329,6 +333,8 @@ export default function DocPanel({ repo, onDocClick }: DocPanelProps) {
                           className="zread-leaf"
                           style={{ '--depth': 0 } as React.CSSProperties}
                           data-slug={child.slug}
+                          target="_blank"
+                          rel="noopener noreferrer"
                         >
                           {ICON_DOC} {child.title}
                         </a>
@@ -359,6 +365,8 @@ export default function DocPanel({ repo, onDocClick }: DocPanelProps) {
                               className="zread-leaf"
                               style={{ '--depth': 1 } as React.CSSProperties}
                               data-slug={item.slug}
+                              target="_blank"
+                              rel="noopener noreferrer"
                             >
                               {item.title}
                             </a>

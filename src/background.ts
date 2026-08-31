@@ -5,7 +5,7 @@
 import { detectLocale } from './github/i18n';
 
 // 版本标记：每次发布改这里，控制台可确认扩展是否真的重载了新代码
-const EXT_VERSION = '2.30';
+const EXT_VERSION = '2.31';
 console.log('[zread-ext] background service worker started, version', EXT_VERSION);
 
 // 缓存键带语言前缀，避免中英文缓存互串
@@ -143,6 +143,38 @@ async function getZreadTabCandidates(): Promise<chrome.tabs.Tab[]> {
   withId.sort((a, b) => Number(tabLooksHealthy(b)) - Number(tabLooksHealthy(a)));
   return withId;
 }
+
+// 隐藏代理标签页单例：并发调用共享同一次创建，已存在则直接复用，避免标签页累积
+let hiddenProxyTabId: number | null = null;
+let hiddenTabCreating: Promise<chrome.tabs.Tab | null> | null = null;
+
+async function ensureHiddenZreadTab(): Promise<chrome.tabs.Tab | null> {
+  if (hiddenProxyTabId != null) {
+    try {
+      return await chrome.tabs.get(hiddenProxyTabId);
+    } catch {
+      hiddenProxyTabId = null;
+    }
+  }
+  if (!hiddenTabCreating) {
+    hiddenTabCreating = (async () => {
+      const tab = await chrome.tabs.create({ url: 'https://zread.ai/', active: false });
+      hiddenProxyTabId = tab.id ?? null;
+      return tab;
+    })();
+    void hiddenTabCreating
+      .catch(() => {})
+      .finally(() => {
+        hiddenTabCreating = null;
+      });
+  }
+  return hiddenTabCreating;
+}
+
+// 隐藏标签页被关闭时清掉引用，下次需要时重建
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabId === hiddenProxyTabId) hiddenProxyTabId = null;
+});
 
 // 在指定标签里发起同站 fetch（浏览器自动带全部 cookie）
 async function zreadFetchInTab(
@@ -299,12 +331,12 @@ async function zreadFetchSmart(
     let candidates = await getZreadTabCandidates();
     console.log('[zread-ext] page proxy candidates:', candidates.map((t) => `${t.id}(${t.title || ''})`).join(', '));
 
-    // 没有现成标签时创建一个隐藏标签
+    // 没有现成标签时创建/复用唯一的隐藏标签
     if (candidates.length === 0) {
-      console.log('[zread-ext] no zread.ai tab, creating hidden one');
-      const tab = await chrome.tabs.create({ url: 'https://zread.ai/', active: false });
+      console.log('[zread-ext] no zread.ai tab, ensuring hidden one');
+      const tab = await ensureHiddenZreadTab();
       await new Promise((r) => setTimeout(r, 1500)); // 等 Cloudflare/页面稳定
-      if (tab.id != null) candidates = [tab];
+      if (tab?.id != null) candidates = [tab];
     }
 
     let last: ZreadResponse | null = null;
@@ -578,11 +610,12 @@ const lastSubmitAt = new Map<string, number>();
 
 function submitOnCooldown(repo: string, mode: 'index' | 'refresh'): boolean {
   const key = `${mode}:${repo}`;
-  const now = Date.now();
   const last = lastSubmitAt.get(key);
-  if (last && now - last < SUBMIT_COOLDOWN) return true; // 冷却中 => 视为已提交，跳过
-  lastSubmitAt.set(key, now);
-  return false;
+  return !!(last && Date.now() - last < SUBMIT_COOLDOWN); // 冷却中 => 视为已提交，跳过
+}
+
+function markSubmitted(repo: string, mode: 'index' | 'refresh'): void {
+  lastSubmitAt.set(`${mode}:${repo}`, Date.now());
 }
 
 async function submitIndexOrRefresh(repo: string, mode: 'index' | 'refresh'): Promise<boolean> {
@@ -601,6 +634,7 @@ async function submitIndexOrRefresh(repo: string, mode: 'index' | 'refresh'): Pr
       const json = JSON.parse(res.text);
       const ok = json?.code === 0;
       console.log('[zread-ext] submit index', repo, '->', ok);
+      if (ok) markSubmitted(repo, mode);
       return ok;
     } else {
       const info = await checkRepoStatus(repo);
@@ -612,6 +646,7 @@ async function submitIndexOrRefresh(repo: string, mode: 'index' | 'refresh'): Pr
       });
       const ok = res.status < 300;
       console.log('[zread-ext] submit refresh', repo, '->', ok);
+      if (ok) markSubmitted(repo, mode);
       return ok;
     }
   } catch (e) {

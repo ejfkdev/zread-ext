@@ -300,7 +300,8 @@ export async function renderMermaid(container?: HTMLElement | null): Promise<num
   if (divs.length === 0) return 0
   mermaid.initialize({
     startOnLoad: false,
-    securityLevel: 'loose',
+    // strict：禁用图表内点击/JS 注入，防止文档中的图表标签携带脚本（XSS）
+    securityLevel: 'strict',
     theme: isDark() ? 'dark' : 'neutral',
   })
   try {

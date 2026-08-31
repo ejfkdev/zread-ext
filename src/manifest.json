@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/chrome-manifest.json",
   "manifest_version": 3,
-  "version": "2.30.0",
+  "version": "2.31.0",
   "name": "Zread Docs for GitHub",
   "description": "在 GitHub 仓库页面直接查看 zread.ai 文档，左侧目录切换内容，复用 README 区域显示。",
   "icons": {
@@ -16,8 +16,7 @@
     "scripting",
     "tabs",
     "storage",
-    "unlimitedStorage",
-    "declarativeNetRequest"
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "*://*.github.com/*",
@@ -36,14 +35,5 @@
       ],
       "run_at": "document_idle"
     }
-  ],
-  "declarative_net_request": {
-    "rule_resources": [
-      {
-        "id": "zread_header_rules",
-        "enabled": true,
-        "path": "rules.json"
-      }
-    ]
-  }
+  ]
 }

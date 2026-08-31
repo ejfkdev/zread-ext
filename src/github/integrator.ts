@@ -5,25 +5,37 @@ export interface RepoInfo {
   repo: string
 }
 
+// GitHub 顶级保留路径名（第一段命中则不可能是用户/仓库名）
+const GITHUB_RESERVED_FIRST_SEGMENTS = new Set([
+  'orgs', 'topics', 'features', 'about', 'sponsors', 'enterprise',
+  'collections', 'events', 'marketplace', 'pricing', 'security',
+  'customer-stories', 'nonprofit', 'readme', 'search', 'new', 'settings',
+  'notifications', 'issues', 'pulls', 'dashboard', 'account', 'apps',
+  'site', 'sites', 'explore', 'integrations', 'guides', 'blog', 'join',
+  'login', 'logout', 'signup', 'trending', 'contact', 'team', 'stars',
+  'users', 'repositories', 'organizations', 'i', 'api', 'graphql',
+  'contact', 'careers', 'press', 'shop', 'status', 'developer',
+])
+
+function isReservedFirstSegment(seg: string): boolean {
+  return GITHUB_RESERVED_FIRST_SEGMENTS.has(seg.toLowerCase())
+}
+
 // 判断是否为 GitHub 仓库主页（仅 owner/repo 根路径）
 export function isGitHubRepoPage(): boolean {
   const { hostname, pathname } = window.location
   if (hostname !== 'github.com') return false
-  if (pathname.includes('/settings')) return false
-  if (pathname.includes('/pulls')) return false
-  if (pathname.includes('/issues')) return false
-  if (pathname.includes('/actions')) return false
-  if (pathname.includes('/wiki')) return false
-  if (pathname.includes('/blob')) return false
-  if (pathname.includes('/tree/')) return false
   if (!/^\/[^/]+\/[^/]+\/?$/.test(pathname)) return false
+  const first = pathname.split('/')[1]
+  if (!first || isReservedFirstSegment(first)) return false
   return true
 }
 
-// 解析 owner/repo（兼容尾斜杠）
+// 解析 owner/repo（兼容尾斜杠；排除 GitHub 保留路径）
 export function parseRepoInfo(): RepoInfo | null {
   const match = window.location.pathname.match(/^\/([^/]+)\/([^/]+)\/?$/)
   if (!match) return null
+  if (isReservedFirstSegment(match[1])) return null
   return { owner: match[1], repo: match[2] }
 }
 
