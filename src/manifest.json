@@ -35,5 +35,14 @@
       ],
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "firefox:browser_specific_settings": {
+    "gecko": {
+      "data_collection_permissions": {
+        "required": [
+          "browsingActivity"
+        ]
+      }
+    }
+  }
 }

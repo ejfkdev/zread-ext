@@ -14,3 +14,6 @@ Thumbs.db
 
 # Tooling / local
 .zcode/
+
+# extension.js local session state
+.extension-js
