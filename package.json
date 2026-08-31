@@ -1,0 +1,32 @@
+{
+  "private": true,
+  "name": "zread-github-ext",
+  "description": "在 GitHub 仓库页面直接查看 zread.ai 文档，左侧目录切换内容，复用 README 区域显示。",
+  "version": "1.0.0",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "extension dev",
+    "start": "extension start",
+    "build": "extension build && npm run build:mermaid",
+    "build:mermaid": "esbuild src/lib/mermaid-renderer.ts --bundle --format=iife --minify --outfile=dist/chromium/mermaid_renderer.js",
+    "preview": "extension preview",
+    "build:chrome": "extension build --browser chrome",
+    "build:firefox": "extension build --browser firefox",
+    "build:edge": "extension build --browser edge"
+  },
+  "dependencies": {
+    "dompurify": "^3.2.3",
+    "marked": "^17.0.5",
+    "mermaid": "^11.17.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.64",
+    "@types/react-dom": "^18.2.21",
+    "esbuild": "^0.28.2",
+    "extension": "^3.10.1",
+    "typescript": "5.3.3"
+  }
+}

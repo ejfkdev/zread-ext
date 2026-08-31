@@ -1,0 +1,1241 @@
+// background.ts — zread.ai 数据获取服务（Service Worker）
+// 请求策略：后台直连优先 → 遇 Cloudflare/网关类异常降级到页面代理 → 仍被拦则提示人机验证。
+// 分区 cookie（cf_clearance）chrome.cookies 读不到，只有页面同站请求会自动携带。
+
+import { detectLocale } from './github/i18n';
+
+// 版本标记：每次发布改这里，控制台可确认扩展是否真的重载了新代码
+const EXT_VERSION = '2.30';
+console.log('[zread-ext] background service worker started, version', EXT_VERSION);
+
+// 缓存键带语言前缀，避免中英文缓存互串
+function contentLocale(): string {
+  return detectLocale() === 'zh' ? 'zh' : 'en';
+}
+// 缓存键版本：解析逻辑变更时升级，强制旧/脏缓存失效
+const CACHE_KEY_V = 'v2';
+// 独立 mermaid 渲染器文件（按需注入，不进主 content script）
+const MERMAID_RENDERER_FILE = 'mermaid_renderer.js';
+function outlineKey(repo: string): string {
+  return `oc:${CACHE_KEY_V}:${contentLocale()}:${repo}`;
+}
+function pageKey(repo: string, slug: string): string {
+  return `pc:${CACHE_KEY_V}:${contentLocale()}:${repo}::${slug}`;
+}
+
+// ==========================================
+// 认证：读取应用层 cookie（token）并拼普通 Cookie 头；
+// locale 由浏览器语言决定：仅中文浏览器用 zh，其余 en（含界面文案与 zread 内容）。
+// 注意：分区 cookie（cf_clearance）chrome.cookies 读不到，
+// 后台直连若被 Cloudflare 拦截，会自动降级到页面代理请求。
+// ==========================================
+function getZreadAuth(): Promise<{ token: string | null; locale: string; cookieHeader: string }> {
+  return new Promise((resolve) => {
+    chrome.cookies.getAll({ url: 'https://zread.ai' }, (cookies) => {
+      let token: string | null = null;
+      let cookieHeader = '';
+      for (const c of cookies) {
+        if (cookieHeader) cookieHeader += '; ';
+        cookieHeader += `${c.name}=${c.value}`;
+        if (c.name === 'CGX_AUTH_TOKEN') token = c.value;
+      }
+      // 仅识别到中文才用 zh，否则 en
+      const locale = detectLocale() === 'zh' ? 'zh' : 'en';
+      resolve({ token, locale, cookieHeader });
+    });
+  });
+}
+
+// ==========================================
+// Cloudflare 拦截检测
+// ==========================================
+class CfChallengeError extends Error {
+  constructor() {
+    super('CF_CHALLENGE');
+    this.name = 'CfChallengeError';
+  }
+}
+
+// Cloudflare / 网关类异常状态码（这些情况后台直连不可靠，需降级到页面代理）
+function isCfStatus(s: number): boolean {
+  return (
+    s === 403 || // Forbidden（CF 拦截）
+    s === 429 || // Too Many Requests（CF 限流）
+    s === 500 || // Internal Server Error
+    s === 502 || // Bad Gateway
+    s === 503 || // Service Unavailable（CF 挑战）
+    s === 504 || // Gateway Timeout
+    (s >= 520 && s <= 529) // CF 自定义错误段
+  );
+}
+
+// Cloudflare 人机验证 / 挑战页的内容特征
+// 注意：zread 正常页面（含"正在收录"页）也可能被 Cloudflare 注入 challenge-platform 脚本，
+// 但它们都是完整的 Next.js 应用页（带 __next_f）。真正的 CF 拦截页没有 __next_f。
+function isCfChallengeText(text: string): boolean {
+  if (!text) return false;
+  if (text.includes('__next_f')) return false; // 完整应用页 => 不是拦截页
+  const markers = [
+    'Just a moment',
+    'Checking your browser',
+    'challenge-platform',
+    '/cdn-cgi/challenge-platform',
+    'cf-challenge-running',
+    'Attention Required',
+    'Performing security verification',
+  ];
+  const lower = text.toLowerCase();
+  return markers.some((m) => lower.includes(m.toLowerCase()));
+}
+
+// 标签页标题是否表明停在人机验证页
+function isChallengeTitle(title: string): boolean {
+  const t = (title || '').toLowerCase();
+  return t.includes('just a moment') || t.includes('checking your browser') || t.includes('attention required');
+}
+
+// 状态码是否属于"真人机挑战"（403/429/503 常伴随挑战页；502/504 是网关错误，不算）
+function isChallengeStatus(s: number): boolean {
+  return s === 403 || s === 429 || s === 503;
+}
+
+// ==========================================
+// 页面代理：在健康的 zread.ai 标签里发起同站请求
+// ==========================================
+
+// ==========================================
+// 核心代理请求：在 zread.ai 标签页上下文里发起 fetch
+// 浏览器自动携带该站全部 cookie（含分区 cf_clearance）
+// ==========================================
+interface ZreadResponse {
+  status: number;
+  ok: boolean;
+  text: string;
+  b64?: string;
+  error?: string;
+  pageUrl?: string;
+  pageTitle?: string;
+}
+
+// 在后台把 base64 还原为字节（RSC 流处理用）
+function b64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+// 判断一个 zread.ai 标签是否"健康"（不是错误页/挑战页/API 页）
+function tabLooksHealthy(t: chrome.tabs.Tab): boolean {
+  const title = (t.title || '').toLowerCase();
+  if (!title) return false; // 无标题 => 还在加载或异常
+  const bad = ['504', '503', '502', 'gateway', 'just a moment', 'checking', 'attention required', 'bad gateway', 'error'];
+  if (bad.some((b) => title.includes(b))) return false;
+  // 停在 API 端点上的标签（显示原始 JSON）不适合做代理
+  if (t.url && /\/api\//.test(t.url)) return false;
+  return true;
+}
+
+// 返回候选标签列表：健康的排前面
+async function getZreadTabCandidates(): Promise<chrome.tabs.Tab[]> {
+  const tabs = await chrome.tabs.query({ url: ['https://zread.ai/*'] });
+  const withId = tabs.filter((t) => t.id != null);
+  withId.sort((a, b) => Number(tabLooksHealthy(b)) - Number(tabLooksHealthy(a)));
+  return withId;
+}
+
+// 在指定标签里发起同站 fetch（浏览器自动带全部 cookie）
+async function zreadFetchInTab(
+  tabId: number,
+  url: string,
+  init: { method?: string; headers?: Record<string, string>; body?: string; asBytes?: boolean } = {}
+): Promise<ZreadResponse> {
+  const method = init.method || 'GET';
+  const headers = init.headers || {};
+  const body = init.body ?? null;
+  const asBytes = init.asBytes === true;
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async (u: string, m: string, h: Record<string, string>, b: string | null, wantBytes: boolean) => {
+      const meta = { pageUrl: location.href, pageTitle: document.title };
+      try {
+        // 若本标签已加载目标 HTML 页（含 flight 数据），直接读 DOM，避免再发一次可能 504 的请求
+        // 注意：RSC 请求（带 rsc 头）不能走 DOM 读取，必须真实请求
+        if (m === 'GET' && !b && !/\/api\//.test(u) && !h['RSC']) {
+          try {
+            const targetPath = new URL(u).pathname.replace(/\/+$/, '');
+            const herePath = location.pathname.replace(/\/+$/, '');
+            const hasFlight = Array.isArray((self as any).__next_f) || document.documentElement.innerHTML.includes('__next_f');
+            if (targetPath === herePath && hasFlight) {
+              return { status: 200, ok: true, text: document.documentElement.outerHTML, ...meta };
+            }
+          } catch {}
+        }
+        if (!h['Authorization']) {
+          const cm = document.cookie.match(/(?:^|;\s*)CGX_AUTH_TOKEN=([^;]+)/);
+          if (cm && cm[1]) h['Authorization'] = `Bearer ${cm[1]}`;
+        }
+        const res = await fetch(u, {
+          method: m,
+          headers: h,
+          body: b,
+          credentials: 'include',
+          redirect: 'follow',
+        });
+        if (wantBytes) {
+          const buf = await res.arrayBuffer();
+          const bytes = new Uint8Array(buf);
+          let bin = '';
+          const c = 0x8000;
+          for (let i = 0; i < bytes.length; i += c) {
+            bin += String.fromCharCode(...bytes.subarray(i, i + c));
+          }
+          return { status: res.status, ok: res.ok, text: '', b64: btoa(bin), ...meta };
+        }
+        const text = await res.text();
+        return { status: res.status, ok: res.ok, text, ...meta };
+      } catch (e) {
+        return { status: 0, ok: false, text: '', error: String(e), ...meta };
+      }
+    },
+    args: [url, method, headers, body, asBytes],
+  });
+
+  const r = results?.[0]?.result as ZreadResponse | undefined;
+  console.log('[zread-ext] page fetch in tab', tabId, ': status', r?.status, 'tabUrl', r?.pageUrl, 'tabTitle', r?.pageTitle, '->', url);
+  if (!r) throw new Error('zread tab returned no result');
+  return r;
+}
+
+// 页面代理响应是否"可用"：200 且正文不是挑战页、所在标签不是错误页
+function pageResultUsable(r: ZreadResponse): boolean {
+  if (r.status !== 200) return false;
+  if (isCfChallengeText(r.text)) return false;
+  if (isChallengeTitle(r.pageTitle || '')) return false;
+  const title = (r.pageTitle || '').toLowerCase();
+  if (/504|503|502|gateway/.test(title)) return false;
+  return true;
+}
+
+// 页面代理响应是否为"真人机挑战"（用于决定是否提示用户过验证）
+function pageResultIsChallenge(r: ZreadResponse): boolean {
+  if (isCfChallengeText(r.text)) return true;
+  if (isChallengeTitle(r.pageTitle || '')) return true;
+  return isChallengeStatus(r.status) && isCfChallengeText(r.text);
+}
+
+// ==========================================
+// 后台直连请求（service worker 内 fetch，带普通 cookie）
+// ==========================================
+async function directFetch(
+  url: string,
+  init: { method?: string; headers?: Record<string, string>; body?: string; asBytes?: boolean } = {}
+): Promise<ZreadResponse> {
+  try {
+    const res = await fetch(url, {
+      method: init.method || 'GET',
+      headers: init.headers || {},
+      body: init.body ?? undefined,
+      redirect: 'follow',
+    });
+    if (init.asBytes) {
+      const buf = await res.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let bin = '';
+      const c = 0x8000;
+      for (let i = 0; i < bytes.length; i += c) {
+        bin += String.fromCharCode(...bytes.subarray(i, i + c));
+      }
+      return { status: res.status, ok: res.ok, text: '', b64: btoa(bin) };
+    }
+    const text = await res.text();
+    return { status: res.status, ok: res.ok, text };
+  } catch (e) {
+    return { status: 0, ok: false, text: '', error: String(e) };
+  }
+}
+
+// 直连响应是否"真正可用"：200、非挑战页；
+// HTML 整页必须带 Next flight 数据（否则视为空/拦截页）；API/JSON 与 RSC 只要求 200。
+function directUsable(r: ZreadResponse, url: string, isRsc = false): boolean {
+  if (r.status !== 200) return false;
+  if (isCfChallengeText(r.text)) return false;
+  const isHtmlPage = !/\/api\//.test(url);
+  if (isHtmlPage && !isRsc && !r.text.includes('__next_f')) return false;
+  return true;
+}
+
+// ==========================================
+// 智能请求：优先后台直连，遇到网络异常 / Cloudflare 拦截时
+// 降级到 zread.ai 页面代理（页面同站请求会自动带分区 cf_clearance）。
+// 若页面代理仍被挑战页拦截 => 抛出 CfChallengeError（提示用户去过人机验证）。
+// ==========================================
+async function zreadFetchSmart(
+  url: string,
+  init: { method?: string; headers?: Record<string, string>; body?: string; asBytes?: boolean } = {}
+): Promise<ZreadResponse> {
+  const { token, locale, cookieHeader } = await getZreadAuth();
+
+  // —— 1) 后台直连 ——
+  const directHeaders = buildHeaders(token, locale, init.headers);
+  if (cookieHeader) directHeaders['Cookie'] = cookieHeader;
+  const isRsc = !!(init.headers && (init.headers['RSC'] || init.headers['rsc']));
+  const direct = await directFetch(url, { ...init, headers: directHeaders });
+
+  if (directUsable(direct, url, isRsc)) {
+    console.log('[zread-ext] direct OK', direct.status, url);
+    return direct;
+  }
+  console.log(
+    `[zread-ext] direct blocked/failed (status=${direct.status}, challengeText=${isCfChallengeText(direct.text)}), falling back to page proxy:`,
+    url
+  );
+
+  // —— 2) 页面代理：在健康的 zread.ai 标签里发同站请求 ——
+  const pageHeaders = buildHeaders(token, locale, init.headers);
+
+  const attemptPageProxy = async (): Promise<{ ok: ZreadResponse | null; last: ZreadResponse | null; sawChallenge: boolean }> => {
+    let candidates = await getZreadTabCandidates();
+    console.log('[zread-ext] page proxy candidates:', candidates.map((t) => `${t.id}(${t.title || ''})`).join(', '));
+
+    // 没有现成标签时创建一个隐藏标签
+    if (candidates.length === 0) {
+      console.log('[zread-ext] no zread.ai tab, creating hidden one');
+      const tab = await chrome.tabs.create({ url: 'https://zread.ai/', active: false });
+      await new Promise((r) => setTimeout(r, 1500)); // 等 Cloudflare/页面稳定
+      if (tab.id != null) candidates = [tab];
+    }
+
+    let last: ZreadResponse | null = null;
+    let sawChallenge = false;
+    const runTab = async (tabId: number): Promise<ZreadResponse | null> => {
+      try {
+        const r = await zreadFetchInTab(tabId, url, { ...init, headers: pageHeaders });
+        last = r;
+        if (pageResultIsChallenge(r)) sawChallenge = true;
+        return pageResultUsable(r) ? r : null;
+      } catch (e) {
+        console.log('[zread-ext] page fetch in tab', tabId, 'threw:', String(e));
+        return null;
+      }
+    };
+
+    for (const tab of candidates.slice(0, 3)) {
+      const ok = await runTab(tab.id!);
+      if (ok) {
+        console.log('[zread-ext] page proxy OK via tab', tab.id, url);
+        return { ok, last, sawChallenge };
+      }
+    }
+
+    // 瞬时 504/502（非真人机挑战）时，在最健康的标签上延迟重试一次
+    const lastResp = last as ZreadResponse | null;
+    if (lastResp && lastResp.status !== 0 && !sawChallenge && candidates.length > 0) {
+      console.log('[zread-ext] transient failure (status', lastResp.status + '), retrying healthiest tab after delay');
+      await new Promise((r) => setTimeout(r, 1200));
+      const ok = await runTab(candidates[0].id!);
+      if (ok) {
+        console.log('[zread-ext] page proxy OK via delayed retry, tab', candidates[0].id, url);
+        return { ok, last, sawChallenge };
+      }
+    }
+    return { ok: null, last: lastResp, sawChallenge };
+  };
+
+  let result = await attemptPageProxy();
+
+  // 网络层异常（status 0，如标签在请求期间导航/框架被移除）时，整体重跑一次
+  if (!result.ok && result.last?.status === 0 && !result.sawChallenge) {
+    console.log('[zread-ext] network-level failure (status 0), re-running page proxy once');
+    await new Promise((r) => setTimeout(r, 800));
+    result = await attemptPageProxy();
+  }
+
+  // —— 3) 全部候选都不行：真人机挑战才提示用户；否则报普通错误 ——
+  if (result.ok) return result.ok;
+  if (result.sawChallenge || (result.last && pageResultIsChallenge(result.last))) {
+    console.log('[zread-ext] page proxy hit a real Cloudflare challenge');
+    throw new CfChallengeError();
+  }
+  throw new Error(`page proxy failed (last status ${result.last?.status})`);
+}
+
+// 构造业务请求头（token + locale）；Cookie 由浏览器自动携带
+function buildHeaders(token: string | null, locale: string, extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { 'X-Locale': locale };
+  if (token) h['Authorization'] = `Bearer ${token}`;
+  if (extra) Object.assign(h, extra);
+  return h;
+}
+
+// ==========================================
+// Next.js flight data 解析
+// ==========================================
+
+// 从 HTML 中提取所有 self.__next_f.push payload 并拼接为完整 flight 流
+function extractFlightPayloads(html: string): string {
+  const pushRegex = /self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)/g;
+  let match: RegExpExecArray | null;
+  let fullFlight = '';
+  while ((match = pushRegex.exec(html)) !== null) {
+    // 用 JSON.parse 正确解码 JS 字符串（替代脆弱的 replace 链）
+    let js: string;
+    try {
+      js = JSON.parse('"' + match[1] + '"');
+    } catch {
+      // 回退：经典反转义链
+      js = match[1]
+        .replace(/\\"/g, '"')
+        .replace(/\\n/g, '\n')
+        .replace(/\\t/g, '\t')
+        .replace(/\\\//g, '/')
+        .replace(/\\\\/g, '\\');
+    }
+    fullFlight += js + '\n';
+  }
+  return fullFlight;
+}
+
+// 从 flight 流字节中提取文档 markdown：遍历所有 T chunk。
+// 若提供 preferSlug，优先取 front-matter 中 slug 匹配的正文；否则取最大的正文 chunk。
+// RSC 响应体本身就是 flight 流，HTML 内的 flight 解码后同样适用。
+function extractMarkdownFromFlightBytes(flightBytes: Uint8Array, preferSlug?: string): string {
+  const flightStr = new TextDecoder('utf-8').decode(flightBytes);
+  const tChunkRegex = /([0-9a-f]+):T([0-9a-f]+),/g;
+  let tm: RegExpExecArray | null;
+  let best = '';
+  let bestMatch = ''; // slug 命中的优先结果
+  while ((tm = tChunkRegex.exec(flightStr)) !== null) {
+    const byteLen = parseInt(tm[2], 16);
+    if (byteLen < 200) continue; // 跳过小 chunk
+    // T chunk 的 contentStart 是字符位置，转为字节位置截取
+    const prefixStr = flightStr.slice(0, tm.index + tm[0].length);
+    const prefixBytes = new TextEncoder().encode(prefixStr).length;
+    const contentBytes = flightBytes.slice(prefixBytes, prefixBytes + byteLen);
+    const content = new TextDecoder('utf-8').decode(contentBytes);
+    const looksLikeDoc = content.startsWith('---\n') || content.includes('## ') || content.trim().startsWith('# ');
+    if (!looksLikeDoc) continue;
+    if (content.length > best.length) best = content;
+    if (preferSlug && content.slice(0, 400).includes('slug:' + preferSlug) && content.length > bestMatch.length) {
+      bestMatch = content;
+    }
+  }
+  return bestMatch || best;
+}
+
+// front-matter 里的 slug 与请求 slug 不一致 => 说明 RSC 给的是别的页，拒绝使用
+function rscSlugMismatch(markdown: string, slug: string): boolean {
+  const fm = markdown.match(/^---\n([\s\S]*?)\n---/);
+  if (!fm) return false; // 无 front-matter，无法判断，放行
+  const m = fm[1].match(/slug:\s*([^\n]+)/);
+  if (!m) return false;
+  return m[1].trim() !== slug;
+}
+
+// 递归查找 wiki 节点（包含 wiki + info 的对象）
+function findWikiNode(node: any): any {
+  if (!node) return null;
+  if (typeof node === 'object' && !Array.isArray(node)) {
+    if ('wiki' in node && node.wiki && typeof node.wiki === 'object' && 'info' in node.wiki) {
+      return node.wiki;
+    }
+    for (const v of Object.values(node)) {
+      const r = findWikiNode(v);
+      if (r) return r;
+    }
+  } else if (Array.isArray(node)) {
+    for (const item of node) {
+      const r = findWikiNode(item);
+      if (r) return r;
+    }
+  }
+  return null;
+}
+
+// 从 flight 流中解析第一个平衡 JSON 对象（包含 wiki 数据）
+function parseWikiFromFlight(flightStr: string): any | null {
+  // 找包含 wiki_id 的位置，向前找最近的 { 开始平衡匹配
+  const wikiIdx = flightStr.indexOf('wiki_id');
+  if (wikiIdx === -1) return null;
+
+  // 向前查找包含 "wiki":{"info" 的最外层 {
+  // flight data 格式: 2d:["$","$L5f",null,{"wiki":{"info":{"wiki_id":"..."
+  // 我们需要找到 {"wiki":{...}} 的起始 {
+  const wikiMarker = '"wiki":{"info"';
+  const markerIdx = flightStr.lastIndexOf(wikiMarker, wikiIdx);
+  if (markerIdx === -1) return null;
+
+  // 从 marker 向前找最近的 {（即 {"wiki":{ 的起始）
+  let braceStart = flightStr.lastIndexOf('{', markerIdx);
+  if (braceStart === -1) return null;
+
+  // 平衡括号匹配，找到闭合的 }
+  let depth = 0;
+  let end = -1;
+  let inStr = false;
+  let esc = false;
+  for (let i = braceStart; i < flightStr.length; i++) {
+    const ch = flightStr[i];
+    if (esc) { esc = false; continue; }
+    if (ch === '\\') { esc = true; continue; }
+    if (ch === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) { end = i + 1; break; }
+    }
+  }
+  if (end === -1) return null;
+
+  try {
+    const data = JSON.parse(flightStr.slice(braceStart, end));
+    return findWikiNode(data);
+  } catch {
+    return null;
+  }
+}
+
+// ==========================================
+// 通过 API 检查仓库索引状态（带 3s 短时去重，避免 prefetch/revalidate 重复请求）
+// ==========================================
+type RepoStatus = { status: string; wiki_id?: string; repo_id?: string; updated_at?: number } | null;
+const statusMemo = new Map<string, { at: number; p: Promise<RepoStatus> }>();
+
+async function checkRepoStatus(repo: string): Promise<RepoStatus> {
+  const now = Date.now();
+  const m = statusMemo.get(repo);
+  if (m && now - m.at < 3000) return m.p;
+  const p = checkRepoStatusLive(repo);
+  statusMemo.set(repo, { at: now, p });
+  p.catch(() => statusMemo.delete(repo));
+  return p;
+}
+
+async function checkRepoStatusLive(repo: string): Promise<RepoStatus> {
+  const [owner, repoName] = repo.split('/');
+  try {
+    const res = await zreadFetchSmart(`https://zread.ai/api/v1/repo/github/${owner}/${repoName}`);
+    if (!res.ok) return null;
+    const json = JSON.parse(res.text);
+    const data = json?.data;
+    if (!data) return null;
+    return {
+      status: data.status || 'unknown',
+      wiki_id: data.wiki_id,
+      repo_id: data.repo_id,
+      updated_at: data.updated_at,
+    };
+  } catch (e) {
+    if (e instanceof CfChallengeError) throw e; // 人机验证错误向上抛
+    return null;
+  }
+}
+
+// 判断是否正在索引/刷新中（已收录但尚未完成）
+function isInProgress(info: { status: string } | null): boolean {
+  return info?.status === 'progress' || info?.status === 'indexing' || info?.status === 'pending';
+}
+
+// 判断是否真正未收录（无 wiki_id 且不在索引中）
+function isNotIndexed(info: { status: string; wiki_id?: string } | null): boolean {
+  if (!info) return true;
+  if (info.wiki_id) return false; // 有 wiki_id 说明已收录
+  return !isInProgress(info); // 无 wiki_id 且不在索引中 => 未收录
+}
+
+// 判断收录是否超过 7 天
+function isStale(info: { updated_at?: number } | null): boolean {
+  if (!info || !info.updated_at) return false;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const sevenDays = 7 * 24 * 60 * 60;
+  return nowSec - info.updated_at > sevenDays;
+}
+
+// 获取收录排队 ETA：GET /api/v1/repo/eta => {code, data:{backlog, estimate_minutes}}
+async function fetchRepoEta(): Promise<{ backlog: number; estimate_minutes: number } | null> {
+  try {
+    const res = await zreadFetchSmart('https://zread.ai/api/v1/repo/eta');
+    if (!res.ok) return null;
+    const json = JSON.parse(res.text);
+    const d = json?.data;
+    if (!d) return null;
+    return { backlog: d.backlog ?? 0, estimate_minutes: d.estimate_minutes ?? 0 };
+  } catch {
+    return null;
+  }
+}
+
+// ==========================================
+// 提交收录 / 刷新（对接 zread.ai 真实 API，参考 ejfkdev/zread）
+//   收录: POST /api/v1/public/repo/submit  body: {name_or_path, notification_email}
+//   刷新: POST /api/v1/repo/{repo_id}/refresh  body: ""
+// 冷却去重：同一仓库同模式在冷却期内只真正提交一次，避免 UI 重复触发/重复刷新。
+// ==========================================
+const SUBMIT_COOLDOWN = 24 * 60 * 60 * 1000; // 1 天
+const lastSubmitAt = new Map<string, number>();
+
+function submitOnCooldown(repo: string, mode: 'index' | 'refresh'): boolean {
+  const key = `${mode}:${repo}`;
+  const now = Date.now();
+  const last = lastSubmitAt.get(key);
+  if (last && now - last < SUBMIT_COOLDOWN) return true; // 冷却中 => 视为已提交，跳过
+  lastSubmitAt.set(key, now);
+  return false;
+}
+
+async function submitIndexOrRefresh(repo: string, mode: 'index' | 'refresh'): Promise<boolean> {
+  if (submitOnCooldown(repo, mode)) {
+    console.log('[zread-ext] submit', mode, 'skipped (cooldown):', repo);
+    return true;
+  }
+  try {
+    if (mode === 'index') {
+      const res = await zreadFetchSmart('https://zread.ai/api/v1/public/repo/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name_or_path: repo, notification_email: 'example@zread.ai' }),
+      });
+      if (!res.ok) return false;
+      const json = JSON.parse(res.text);
+      const ok = json?.code === 0;
+      console.log('[zread-ext] submit index', repo, '->', ok);
+      return ok;
+    } else {
+      const info = await checkRepoStatus(repo);
+      if (!info?.repo_id) return false;
+      const res = await zreadFetchSmart(`https://zread.ai/api/v1/repo/${info.repo_id}/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '',
+      });
+      const ok = res.status < 300;
+      console.log('[zread-ext] submit refresh', repo, '->', ok);
+      return ok;
+    }
+  } catch (e) {
+    if (e instanceof CfChallengeError) throw e;
+    console.log('[zread-ext] submit', mode, 'failed for', repo, e);
+    return false;
+  }
+}
+
+// ==========================================
+// 获取仓库文档目录（缓存优先）
+// 有缓存 => 立即返回（不发任何阻塞请求），后台异步校验是否更新；
+// 无缓存 => 走实时抓取。
+// ==========================================
+async function fetchOutline(repo: string) {
+  console.log('[zread-ext] fetchOutline:', repo);
+  const key = outlineKey(repo);
+  const cached = await cacheGet(key);
+
+  if (cached?.data?.outline?.length) {
+    console.log('[zread-ext] outline cache HIT (no blocking request):', repo);
+    cacheTouch(key, cached);
+    void revalidateOutline(repo, key, cached); // 后台校验，不阻塞
+    return {
+      ...cached.data,
+      notIndexed: false,
+      inProgress: false,
+      stale: isStale({ updated_at: cached.updatedAt }),
+      fromCache: true,
+    };
+  }
+
+  return fetchOutlineLive(repo);
+}
+
+// 后台校验目录缓存是否过期：过期则清缓存、重抓目录并重新预取
+async function revalidateOutline(repo: string, key: string, cached: CacheEntry): Promise<void> {
+  try {
+    const st = await checkRepoStatus(repo);
+    if (!st) return; // 状态接口失败 => 保留缓存
+    if (isInProgress(st)) return; // 刷新/索引进行中 => 保留旧文档，不清缓存
+    if (cacheFresh(cached, st.updated_at, st.wiki_id)) return; // 未更新 => 不动
+    console.log('[zread-ext] background: repo updated, clearing + reloading:', repo);
+    await clearRepoCache(repo);
+    const data = await fetchOutlineLive(repo);
+    if (data?.outline?.length) {
+      const slugs = [...data.outline].sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0)).map((p: any) => p.slug);
+      if (slugs.length) startPrefetch(repo, slugs);
+    }
+  } catch (e) {
+    console.log('[zread-ext] background revalidate error:', String(e));
+  }
+}
+
+// 实时抓取目录（无缓存或缓存失效时）
+async function fetchOutlineLive(repo: string) {
+  const statusInfo = await checkRepoStatus(repo);
+  console.log('[zread-ext] repo status:', statusInfo?.status);
+
+  const key = outlineKey(repo);
+
+  if (isNotIndexed(statusInfo)) {
+    const eta = await fetchRepoEta();
+    return { outline: [], wiki_id: statusInfo?.wiki_id, repo_id: statusInfo?.repo_id, notIndexed: true, inProgress: false, stale: false, eta };
+  }
+
+  try {
+    const res = await zreadFetchSmart(`https://zread.ai/${repo}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const html = res.text;
+
+    const flightStr = extractFlightPayloads(html);
+    const wiki = parseWikiFromFlight(flightStr);
+    const pages = wiki?.pages || [];
+
+    // 解析不到目录：
+    //  - 若正在索引/刷新（progress）=> 显示"索引中"，不重复提交
+    //  - 否则视为未收录 => 提交收录
+    if (pages.length === 0) {
+      const inProgress = isInProgress(statusInfo);
+      // 刷新/索引中但本地有旧目录 => 展示旧文档（带 inProgress 标记），不显示"收录中"
+      if (inProgress) {
+        const cachedOld = await cacheGet(key);
+        if (cachedOld?.data?.outline?.length) {
+          console.log('[zread-ext] in progress but show cached old outline:', repo);
+          return { ...cachedOld.data, notIndexed: false, inProgress: true, stale: false };
+        }
+      }
+      const eta = await fetchRepoEta();
+      return {
+        outline: [],
+        wiki_id: statusInfo?.wiki_id,
+        repo_id: statusInfo?.repo_id,
+        notIndexed: !inProgress,
+        inProgress,
+        stale: false,
+        eta,
+      };
+    }
+
+    const outline = pages.map((p: any) => ({
+      page_id: p.page_id,
+      slug: p.slug,
+      title: [p.section, p.group, p.topic].filter(Boolean).join('/') || p.slug,
+      topic: p.topic || '',
+      group: p.group || '',
+      section: p.section || '',
+      order: p.order ?? 0,
+    }));
+
+    const data = {
+      outline,
+      wiki_id: wiki.info?.wiki_id,
+      repo_id: wiki.info?.repo_id,
+      notIndexed: false,
+      inProgress: false,
+    };
+    await cacheSet(key, data, statusInfo?.updated_at ?? 0, statusInfo?.wiki_id);
+
+    console.log('[zread-ext] outline success (fetched), pages:', outline.length);
+    return { ...data, stale: isStale(statusInfo) };
+  } catch (e) {
+    // 抓取失败但有缓存 => 兜底返回缓存
+    const fallback = await cacheGet(key);
+    if (fallback?.data?.outline?.length) {
+      console.log('[zread-ext] outline fetch failed, falling back to stale cache');
+      return { ...fallback.data, stale: isStale(statusInfo), fromCache: true };
+    }
+    throw e;
+  }
+}
+
+// ==========================================
+// 获取单页 Markdown 内容（带缓存 + 在途去重）
+// 缓存命中且 repo 未更新 => 直接返回；否则实时抓取并覆盖缓存；
+// 抓取失败但有过期缓存 => 兜底返回缓存。
+// statusInfo 可由调用方预取传入（预取时复用，避免重复请求状态接口）。
+// ==========================================
+async function fetchPage(repo: string, slug: string, statusInfo?: any, isUser = true) {
+  console.log('[zread-ext] fetchPage:', repo, slug, isUser ? '(user)' : '(prefetch)');
+  if (isUser) markUserLoad(repo, slug);
+
+  const fk = `${repo}::${slug}`;
+  const pkey = pageKey(repo, slug);
+  // 已在途（用户或预取正在抓同一篇）=> 等待其完成并返回缓存/结果，避免重复请求
+  if (inFlight.has(fk)) {
+    console.log('[zread-ext] fetchPage: already in flight, waiting:', fk);
+    await waitForInFlight(fk);
+    const c = await cacheGet(pkey);
+    if (c?.data?.markdown) return { ...c.data, fromCache: true };
+  }
+
+  // 用户点击且无预取传入状态 => 先乐观读缓存，命中秒返回（不发阻塞请求），后台校验
+  if (isUser && statusInfo === undefined) {
+    const c0 = await cacheGet(pkey);
+    if (c0?.data?.markdown) {
+      console.log('[zread-ext] page cache HIT (no blocking request):', repo, slug);
+      cacheTouch(pkey, c0);
+      void revalidatePage(repo, slug, c0);
+      return { ...c0.data, fromCache: true };
+    }
+  }
+
+  inFlight.add(fk);
+
+  try {
+    // 用 repo 状态（updated_at/wiki_id）作为失效依据
+    const st = statusInfo !== undefined ? statusInfo : await checkRepoStatus(repo);
+    const key = pkey;
+    const cached = await cacheGet(key);
+    if (cacheFresh(cached, st?.updated_at, st?.wiki_id) && cached?.data?.markdown) {
+      console.log('[zread-ext] page cache HIT:', repo, slug);
+      return { ...cached.data, fromCache: true };
+    }
+
+    try {
+      const page = await fetchPageLive(repo, slug);
+      if (page?.markdown) {
+        await cacheSet(key, { markdown: page.markdown }, st?.updated_at ?? 0, st?.wiki_id);
+      }
+      return page;
+    } catch (e) {
+      if (cached?.data?.markdown) {
+        console.log('[zread-ext] page fetch failed, falling back to stale cache:', repo, slug);
+        return { ...cached.data, fromCache: true };
+      }
+      throw e;
+    }
+  } finally {
+    inFlight.delete(fk);
+    notifyInFlight(fk);
+  }
+}
+
+// 后台校验单页缓存是否过期：过期则重抓覆盖（不阻塞当前展示）
+async function revalidatePage(repo: string, slug: string, cached: CacheEntry): Promise<void> {
+  try {
+    const st = await checkRepoStatus(repo);
+    if (!st) return;
+    if (cacheFresh(cached, st.updated_at, st.wiki_id)) return; // 未更新
+    console.log('[zread-ext] background: page updated, refetching:', slug);
+    const page = await fetchPageLive(repo, slug);
+    if (page?.markdown) {
+      await cacheSet(pageKey(repo, slug), { markdown: page.markdown }, st.updated_at ?? 0, st.wiki_id);
+    }
+  } catch (e) {
+    console.log('[zread-ext] background page revalidate error:', slug, String(e));
+  }
+}
+
+// 实时抓取单页（原逻辑：HTML 提 T chunk，失败回退 RSC）
+// 抓取单页：优先 RSC（rsc:1，响应只含 flight 流，小且快），无正文/失败再回退完整 HTML。
+async function fetchPageLive(repo: string, slug: string) {
+  try {
+    const md = await fetchPageRSC(repo, slug);
+    if (md?.markdown) {
+      console.log('[zread-ext] page via RSC, markdown length:', md.markdown.length);
+      return md;
+    }
+    console.log('[zread-ext] RSC returned no markdown, falling back to HTML');
+  } catch (e) {
+    console.log('[zread-ext] RSC failed, falling back to HTML:', String(e));
+  }
+  return fetchPageHTML(repo, slug);
+}
+
+// 回退：完整 HTML，提取内嵌 flight 后解析 T chunk
+async function fetchPageHTML(repo: string, slug: string) {
+  const res = await zreadFetchSmart(`https://zread.ai/${repo}/${slug}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const fullFlight = extractFlightPayloads(res.text);
+  const markdown = extractMarkdownFromFlightBytes(new TextEncoder().encode(fullFlight), slug);
+  console.log('[zread-ext] page via HTML, markdown length:', markdown.length);
+  return { markdown };
+}
+
+// RSC 方式：rsc:1 头，响应体即 flight 流。
+// 解析采用官方 zread 的"倒找 ,---"法取最后一个正文 chunk；失败再退回全 T chunk 扫描。
+// 若 RSC 给的是别的页（slug 不匹配）则返回空，交由 HTML 回退，保证内容正确。
+async function fetchPageRSC(repo: string, slug: string) {
+  const res = await zreadFetchSmart(`https://zread.ai/${repo}/${slug}`, {
+    headers: { RSC: '1' },
+    asBytes: true,
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const buffer = res.b64 ? b64ToBytes(res.b64) : new TextEncoder().encode(res.text);
+  let markdown = parseRscEndMarker(buffer);
+  if (!markdown) markdown = extractMarkdownFromFlightBytes(buffer, slug);
+  if (markdown && rscSlugMismatch(markdown, slug)) {
+    console.log('[zread-ext] RSC returned wrong slug, rejecting:', slug);
+    return { markdown: '' };
+  }
+  return { markdown };
+}
+
+// 官方解析：倒着找 ",---"，取其前行头部 id:T<len>, 再截取 len 字节正文
+function parseRscEndMarker(buffer: Uint8Array): string {
+  const marker = [44, 45, 45, 45]; // ",---"
+  let endPos = -1;
+  for (let i = buffer.length - marker.length; i >= 0; i--) {
+    let found = true;
+    for (let j = 0; j < marker.length; j++) {
+      if (buffer[i + j] !== marker[j]) { found = false; break; }
+    }
+    if (found) { endPos = i; break; }
+  }
+  if (endPos === -1) return '';
+  let lineStart = 0;
+  for (let i = endPos - 1; i >= 0; i--) {
+    if (buffer[i] === 10) { lineStart = i + 1; break; }
+  }
+  const headerLine = new TextDecoder('iso-8859-1').decode(buffer.slice(lineStart, endPos + 1));
+  const m = /^([0-9a-f]+):T([0-9a-f]+),/.exec(headerLine);
+  if (!m) return '';
+  const byteLength = parseInt(m[2], 16);
+  const headerEnd = lineStart + m[0].length;
+  try {
+    return new TextDecoder('utf-8').decode(buffer.slice(headerEnd, headerEnd + byteLength));
+  } catch {
+    return '';
+  }
+}
+
+// ==========================================
+// 缓存层：chrome.storage.local + LRU（50MB 软上限）
+// 失效依据：repo 的 updated_at / wiki_id 变化 => 重新抓取覆盖
+// ==========================================
+const CACHE_MAX_BYTES = 50 * 1024 * 1024;
+
+interface CacheEntry {
+  k: string;        // 缓存键
+  lastAccess: number; // 最后访问时间 (ms)
+  updatedAt: number;  // 抓取时 repo 的 updated_at (秒)
+  wiki_id?: string;   // 抓取时的 wiki_id
+  data: any;          // 业务数据
+  size: number;       // 估算字节数
+}
+
+function estBytes(obj: unknown): number {
+  try {
+    return JSON.stringify(obj).length;
+  } catch {
+    return 0;
+  }
+}
+
+async function cacheGet(key: string): Promise<CacheEntry | null> {
+  try {
+    const r = await chrome.storage.local.get(key);
+    const e = r?.[key] as CacheEntry | undefined;
+    if (!e) return null;
+    return e;
+  } catch {
+    return null;
+  }
+}
+
+// 命中后异步刷新 lastAccess（不阻塞、不影响本次读取）
+function cacheTouch(key: string, e: CacheEntry): void {
+  const updated = { ...e, lastAccess: Date.now() };
+  chrome.storage.local.set({ [key]: updated });
+}
+
+async function cacheSet(key: string, data: any, updatedAt: number, wiki_id?: string): Promise<void> {
+  const entry: CacheEntry = {
+    k: key,
+    lastAccess: Date.now(),
+    updatedAt,
+    wiki_id,
+    data,
+    size: estBytes(data) + 200,
+  };
+  try {
+    await chrome.storage.local.set({ [key]: entry });
+  } catch (e) {
+    console.log('[zread-ext] cache set failed for', key, String(e));
+  }
+  evictIfNeeded();
+}
+
+// 超出 50MB 时按 lastAccess 从旧到新删除
+async function evictIfNeeded(): Promise<void> {
+  try {
+    const all = await chrome.storage.local.get(null);
+    const entries: CacheEntry[] = [];
+    let total = 0;
+    for (const key of Object.keys(all)) {
+      const e = all[key] as CacheEntry;
+      if (e && typeof e === 'object' && e.k && typeof e.size === 'number') {
+        entries.push(e);
+        total += e.size;
+      }
+    }
+    if (total <= CACHE_MAX_BYTES) return;
+    entries.sort((a, b) => a.lastAccess - b.lastAccess);
+    const toRemove: string[] = [];
+    while (total > CACHE_MAX_BYTES && entries.length > 0) {
+      const oldest = entries.shift()!;
+      toRemove.push(oldest.k);
+      total -= oldest.size;
+    }
+    if (toRemove.length) {
+      console.log('[zread-ext] cache evict', toRemove.length, 'entries, new total', total);
+      await chrome.storage.local.remove(toRemove);
+    }
+  } catch (e) {
+    console.log('[zread-ext] cache evict error:', String(e));
+  }
+}
+
+// 判断缓存是否与当前 repo 状态一致（未更新）
+function cacheFresh(e: CacheEntry | null, updatedAt?: number, wiki_id?: string): boolean {
+  if (!e) return false;
+  if (wiki_id && e.wiki_id && e.wiki_id !== wiki_id) return false;
+  if (updatedAt && e.updatedAt && e.updatedAt !== updatedAt) return false;
+  return true;
+}
+
+// ==========================================
+// 仓库级缓存清除：检测到文档更新（updated_at/wiki_id 变化）时
+// 删除该仓库的目录缓存 + 全部单页缓存，随后由预取重新后台加载。
+// ==========================================
+async function clearRepoCache(repo: string): Promise<number> {
+  try {
+    const all = await chrome.storage.local.get(null);
+    const toRemove: string[] = [];
+    for (const key of Object.keys(all)) {
+      const isOutline = key.startsWith('oc:') && key.endsWith(`:${repo}`);
+      const isPage = key.startsWith('pc:') && key.includes(`:${repo}::`);
+      if (isOutline || isPage) toRemove.push(key);
+    }
+    if (toRemove.length) {
+      await chrome.storage.local.remove(toRemove);
+      console.log('[zread-ext] cleared stale repo cache:', repo, 'entries:', toRemove.length);
+    }
+    return toRemove.length;
+  } catch (e) {
+    console.log('[zread-ext] clearRepoCache error:', String(e));
+    return 0;
+  }
+}
+
+// ==========================================
+// 在途去重：同一 repo::slug 同时只有一个抓取任务
+// ==========================================
+const inFlight = new Set<string>();
+const inFlightWaiters = new Map<string, Array<() => void>>();
+
+function waitForInFlight(key: string): Promise<void> {
+  return new Promise((resolve) => {
+    const arr = inFlightWaiters.get(key) || [];
+    arr.push(resolve);
+    inFlightWaiters.set(key, arr);
+    // 安全阀：最多等 60s，防止悬挂
+    setTimeout(resolve, 60000);
+  });
+}
+
+function notifyInFlight(key: string): void {
+  const arr = inFlightWaiters.get(key);
+  if (arr) {
+    inFlightWaiters.delete(key);
+    arr.forEach((fn) => fn());
+  }
+}
+
+// ==========================================
+// 预取调度器：目录就绪后按顺序串行预取并缓存文档
+// 第一个立即抓取，之后每隔 PREFETCH_INTERVAL 抓下一个；
+// 跳过已缓存/在途的；用户点击的优先（不与其冲突）；
+// 遇到人机挑战或连续失败则停止，避免无效轰炸。
+// ==========================================
+const PREFETCH_INTERVAL = 5000;
+
+interface PrefetchState {
+  repo: string;
+  slugs: string[];
+  index: number;
+  timer: ReturnType<typeof setTimeout> | null;
+  status: any;
+  consecFail: number;
+  stopped: boolean;
+}
+let prefetchState: PrefetchState | null = null;
+
+function stopPrefetch(): void {
+  if (prefetchState) {
+    prefetchState.stopped = true;
+    if (prefetchState.timer) clearTimeout(prefetchState.timer);
+  }
+  prefetchState = null;
+}
+
+function startPrefetch(repo: string, slugs: string[]): void {
+  stopPrefetch();
+  const state: PrefetchState = { repo, slugs, index: 0, timer: null, status: null, consecFail: 0, stopped: false };
+  prefetchState = state;
+  console.log('[zread-ext] prefetch start:', repo, 'docs:', slugs.length);
+  // 第一个立即开始（先拿一次状态供后续复用）
+  (async () => {
+    state.status = await checkRepoStatus(repo);
+    // 页面刷新/重开时跳过"已有缓存"的，从第一个没缓存的开始（不按 updated_at 判新鲜，保证续传）
+    while (state.index < state.slugs.length) {
+      const c = await cacheGet(pageKey(repo, state.slugs[state.index]));
+      if (c?.data?.markdown) {
+        state.index++;
+      } else {
+        break;
+      }
+    }
+    console.log('[zread-ext] prefetch resume at index', state.index, '/', slugs.length);
+    prefetchTick(state, 0);
+  })();
+}
+
+function prefetchTick(state: PrefetchState, delay: number): void {
+  if (state.stopped || prefetchState !== state) return;
+  state.timer = setTimeout(() => void prefetchStep(state), delay);
+}
+
+async function prefetchStep(state: PrefetchState): Promise<void> {
+  if (state.stopped || prefetchState !== state) return;
+  if (state.index >= state.slugs.length) {
+    console.log('[zread-ext] prefetch done:', state.repo);
+    stopPrefetch();
+    return;
+  }
+  const slug = state.slugs[state.index++];
+  const fk = `${state.repo}::${slug}`;
+
+  // 已在途（用户正在看或已有任务）=> 跳过，尽快下一个
+  if (inFlight.has(fk)) {
+    prefetchTick(state, 300);
+    return;
+  }
+  // 已有缓存 => 跳过（更新时会由 clearRepoCache 清掉，届时才会重抓）
+  const cached = await cacheGet(pageKey(state.repo, slug));
+  if (cached?.data?.markdown) {
+    prefetchTick(state, 300);
+    return;
+  }
+
+  try {
+    await fetchPage(state.repo, slug, state.status, false);
+    state.consecFail = 0;
+    console.log('[zread-ext] prefetch cached:', slug);
+    prefetchTick(state, PREFETCH_INTERVAL);
+  } catch (e) {
+    if (e instanceof CfChallengeError) {
+      console.log('[zread-ext] prefetch stopped by CF challenge');
+      stopPrefetch();
+      return;
+    }
+    state.consecFail++;
+    console.log('[zread-ext] prefetch failed for', slug, '(' + state.consecFail + ')');
+    if (state.consecFail >= 3) {
+      console.log('[zread-ext] prefetch stopped after consecutive failures');
+      stopPrefetch();
+      return;
+    }
+    prefetchTick(state, PREFETCH_INTERVAL);
+  }
+}
+
+// 用户主动加载某篇时：若预取正停在它后面不影响；预取会因 inFlight 自动让路
+function markUserLoad(repo: string, slug: string): void {
+  // 将用户点击的 slug 提前没有副作用；这里仅记录日志
+  if (prefetchState && prefetchState.repo === repo) {
+    console.log('[zread-ext] user load while prefetching:', slug);
+  }
+}
+
+// ==========================================
+// 消息处理
+// ==========================================
+
+// 把错误统一转成响应体；Cloudflare 人机验证错误映射为 CF_CHALLENGE
+function errPayload(err: unknown): { error: string } {
+  if (err instanceof CfChallengeError) return { error: 'CF_CHALLENGE' };
+  return { error: err instanceof Error ? err.message : String(err) };
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  console.log('[zread-ext] background received message:', message?.type);
+  if (!message || !message.type) return false;
+
+  if (message.type === 'zreadReadOutline') {
+    fetchOutline(message.repo)
+      .then((data) =>
+        sendResponse({
+          outline: data.outline,
+          wiki_id: data.wiki_id,
+          repo_id: data.repo_id,
+          notIndexed: data.notIndexed,
+          inProgress: data.inProgress,
+          stale: data.stale,
+          eta: data.eta,
+        })
+      )
+      .catch((err) => {
+        console.error('[zread-ext] outline error:', err?.message || err);
+        sendResponse(errPayload(err));
+      });
+    return true;
+  }
+
+  if (message.type === 'zreadSubmit') {
+    // mode: 'index' | 'refresh'
+    submitIndexOrRefresh(message.repo, message.mode || 'index')
+      .then((ok) => sendResponse({ ok }))
+      .catch((err) => {
+        if (err instanceof CfChallengeError) sendResponse({ ok: false, ...errPayload(err) });
+        else sendResponse({ ok: false });
+      });
+    return true;
+  }
+
+  if (message.type === 'zreadReadPage') {
+    fetchPage(message.repo, message.slug)
+      .then((page) => sendResponse({ page }))
+      .catch((err) => {
+        console.error('[zread-ext] page error:', err?.message || err);
+        sendResponse(errPayload(err));
+      });
+    return true;
+  }
+
+  if (message.type === 'zreadRenderMermaid') {
+    const tabId = sender.tab?.id;
+    if (tabId == null) {
+      sendResponse({ ok: false });
+      return false;
+    }
+    chrome.scripting
+      .executeScript({ target: { tabId }, files: [MERMAID_RENDERER_FILE] })
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => {
+        console.log('[zread-ext] inject mermaid renderer failed:', e);
+        sendResponse({ ok: false });
+      });
+    return true;
+  }
+
+  if (message.type === 'zreadPrefetch') {
+    // 目录就绪后，按顺序串行预取并缓存文档
+    if (Array.isArray(message.slugs) && message.slugs.length) {
+      startPrefetch(message.repo, message.slugs);
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message.type === 'zreadOpenSite') {
+    // UI 请求打开 zread.ai 让用户过人机验证
+    chrome.tabs.create({ url: 'https://zread.ai/', active: true });
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message.type === 'zreadPing') {
+    // 返回运行中的扩展版本，用于确认是否重载了新代码
+    sendResponse({ version: EXT_VERSION });
+    return false;
+  }
+
+  return false;
+});

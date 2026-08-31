@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Store packages
+release/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+
+# Tooling / local
+.zcode/
