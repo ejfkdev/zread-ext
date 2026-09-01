@@ -37,10 +37,14 @@ function startObserver() {
     setTimeout(startObserver, 100)
     return
   }
-  urlObserver = new MutationObserver(() => {
+  const check = () => {
     if (window.location.pathname !== lastPath) init()
-  })
+  }
+  urlObserver = new MutationObserver(check)
   urlObserver.observe(document.body, { childList: true, subtree: true })
+  // 兜底：浏览器前进/后退与锚点跳转
+  window.addEventListener('popstate', check)
+  window.addEventListener('hashchange', check)
 }
 
 startObserver()

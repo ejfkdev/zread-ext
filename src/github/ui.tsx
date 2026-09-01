@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import type { RepoInfo } from './integrator'
-import { findReadmeBox, findReadmeContainer } from './integrator'
+import { findReadmeBox, findReadmeContainer, isGitHubRepoPage } from './integrator'
 import DocPanel from './doc-panel'
 import { t } from './i18n'
 
@@ -373,6 +373,7 @@ function guardReadmeRestore(durationMs = 1500) {
     readmeRestoreGuard.disconnect()
     readmeRestoreGuard = null
   }
+  if (!isGitHubRepoPage()) return // 非仓库主页不存在需要守护的 README
   const container = findReadmeContainer()
   const watchRoot = container?.parentElement || document.body
   const deadline = Date.now() + durationMs
@@ -697,6 +698,8 @@ function syncSidebarFrame() {
 // ==========================================
 function buildToggleButton() {
   if (toggleButton && toggleButton.isConnected) return
+  // 注入的唯一闸口：非仓库主页（blob/tree 等）一律不注入
+  if (!isGitHubRepoPage()) return
   const box = findReadmeBox()
   if (!box) return
 
@@ -756,6 +759,9 @@ const GitHubUI = {
 
     // MutationObserver：GitHub SPA 重渲染会移除注入元素，自动恢复
     mutationObserver = new MutationObserver(() => {
+      // SPA 跳到非仓库主页（blob/tree/settings 等）时由入口负责 cleanup，这里绝不重建
+      if (!isGitHubRepoPage()) return
+
       // 检查按钮或 marker 是否被移除
       if ((toggleButton && !toggleButton.isConnected) || 
           (sidebarMarker && !sidebarMarker.isConnected)) {
