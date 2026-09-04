@@ -228,7 +228,7 @@ function injectStyles() {
       flex-direction: column;
       align-items: center;
       gap: 12px;
-      padding: 6px 0;
+      padding: 0 0 6px;
       border-radius: 4px;
       cursor: pointer;
       z-index: 900;

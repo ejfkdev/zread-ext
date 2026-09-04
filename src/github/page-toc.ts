@@ -93,12 +93,14 @@ function positionRail() {
   if (cramped) hideCard()
 
   // 垂直位置：跟随滚动，但限制在文档正文区域内（同左侧目录的跟随逻辑）
-  const docTop = r.top + 64 // 跳过 README 头部行
+  // 上缘对齐 README 头部（README/Contributing 标签行）的下边缘
+  const head = box.querySelector('[class*="Box-header"], [class*="UnderlineNav"]') as HTMLElement | null
+  const docTop = (head ? head.getBoundingClientRect().bottom : r.top + 64) + 8
   const docBottom = r.bottom - 24
-  const railTop = Math.max(docTop, Math.min(96, docBottom - railEl.offsetHeight))
+  const railTop = Math.min(docTop, docBottom - railEl.offsetHeight)
   railEl.style.top = `${railTop}px`
   const cardH = cardEl.offsetHeight || 200
-  const cardTop = Math.max(docTop, Math.min(railTop, docBottom - cardH))
+  const cardTop = Math.min(railTop, docBottom - cardH)
   cardEl.style.top = `${cardTop}px`
 }
 
