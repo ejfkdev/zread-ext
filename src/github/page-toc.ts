@@ -73,23 +73,33 @@ function onScroll() {
   requestAnimationFrame(() => {
     scrollTicking = false
     computeActive()
+    positionRail()
   })
 }
 
 function positionRail() {
   if (!railEl || !cardEl) return
   const readme = document.querySelector('article.markdown-body')
-  const anchor = (readme?.closest('[class*="OverviewRepoFiles-module__Box_1__"]') ||
+  const box = (readme?.closest('[class*="OverviewRepoFiles-module__Box_1__"]') ||
     readme?.closest('[class*="Box"]') || readme) as HTMLElement | null
-  if (!anchor) return
-  const r = anchor.getBoundingClientRect()
+  if (!box) return
+  const r = box.getBoundingClientRect()
+  // 水平位置：README 卡片右缘外 24px；视口放不下则隐藏
   const x = Math.min(r.right + 24, window.innerWidth - 28)
   railEl.style.left = `${x}px`
-  cardEl.style.left = `${x - 8}px`
-  // 视口太窄（README 右侧放不下）时隐藏
+  cardEl.style.left = `${x + 28}px` // 卡片在轨道右侧展开
   const cramped = r.right + 70 > window.innerWidth
   railEl.classList.toggle('zread-toc-hidden', cramped)
   if (cramped) hideCard()
+
+  // 垂直位置：跟随滚动，但限制在文档正文区域内（同左侧目录的跟随逻辑）
+  const docTop = r.top + 64 // 跳过 README 头部行
+  const docBottom = r.bottom - 24
+  const railTop = Math.max(docTop, Math.min(96, docBottom - railEl.offsetHeight))
+  railEl.style.top = `${railTop}px`
+  const cardH = cardEl.offsetHeight || 200
+  const cardTop = Math.max(docTop, Math.min(railTop, docBottom - cardH))
+  cardEl.style.top = `${cardTop}px`
 }
 
 function showCard() {

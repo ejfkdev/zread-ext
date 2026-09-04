@@ -248,7 +248,6 @@ function injectStyles() {
     .zread-toc-card {
       position: fixed;
       top: 96px;
-      transform: translateX(-100%);
       width: 260px;
       max-height: 70vh;
       display: flex;

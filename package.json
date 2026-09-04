@@ -2,7 +2,7 @@
   "private": true,
   "name": "zread-github-ext",
   "description": "在 GitHub 仓库页面直接查看 zread.ai 文档，左侧目录切换内容，复用 README 区域显示。",
-  "version": "2.32.0",
+  "version": "2.32.1",
   "license": "MIT",
   "type": "module",
   "scripts": {
