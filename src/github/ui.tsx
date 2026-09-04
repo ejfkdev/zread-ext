@@ -6,6 +6,7 @@ import DOMPurify from 'dompurify'
 import type { RepoInfo } from './integrator'
 import { findReadmeBox, findReadmeContainer, isGitHubRepoPage } from './integrator'
 import DocPanel from './doc-panel'
+import { buildPageToc, removePageToc } from './page-toc'
 import { t } from './i18n'
 
 let docPanelRoot: Root | null = null
@@ -218,6 +219,69 @@ function injectStyles() {
       color: #1a7f37;
     }
 
+    /* ============ 页内目录（仿 zread.ai 进度轨 + 悬停卡片） ============ */
+    .zread-toc-rail {
+      position: fixed;
+      top: 96px;
+      width: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      padding: 6px 0;
+      border-radius: 4px;
+      cursor: pointer;
+      z-index: 900;
+      transition: background .15s;
+    }
+    .zread-toc-rail:hover { background: rgba(217,217,217,.2); }
+    .zread-toc-rail.zread-toc-hidden { display: none; }
+    .zread-toc-dash {
+      width: 12px; height: 4px;
+      border-radius: 999px;
+      background: #999999;
+      transition: background .15s, height .15s;
+    }
+    .zread-toc-dash:hover { background: #6e7681; }
+    .zread-toc-dash.active { background: #00b0aa; height: 5px; }
+
+    .zread-toc-card {
+      position: fixed;
+      top: 96px;
+      transform: translateX(-100%);
+      width: 260px;
+      max-height: 70vh;
+      display: flex;
+      flex-direction: column;
+      background: #ffffff;
+      border: 1px solid #d1d9e0;
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(140,149,159,.2);
+      padding: 14px 16px;
+      z-index: 901;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .15s;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .zread-toc-card.open { opacity: 1; pointer-events: auto; }
+    .zread-toc-card-title {
+      font-size: 15px; font-weight: 600; color: #1f2328;
+      margin-bottom: 10px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .zread-toc-card-list { overflow-y: auto; min-height: 0; }
+    .zread-toc-card-list a {
+      display: block;
+      padding: 4px 0;
+      font-size: 13px; font-weight: 500;
+      color: #1f2328; text-decoration: none;
+      transition: color .15s;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .zread-toc-card-list a:hover { color: rgba(0,176,170,.9); }
+    .zread-toc-card-list a.active { color: #00b0aa; }
+
     /* ============ 跟随系统暗色模式 ============ */
     @media (prefers-color-scheme: dark) {
       .zread-toggle-btn { color: #e6edf3; background: #21262d; border-color: #30363d; }
@@ -261,6 +325,16 @@ function injectStyles() {
       .zread-code-copy:hover { background: #161b22; color: #e6edf3; }
       .zread-code-copy.copied { color: #3fb950; }
       .zread-code-copy.copied svg { color: #3fb950; }
+
+      .zread-toc-rail:hover { background: rgba(217,217,217,.1); }
+      .zread-toc-dash { background: #6e7681; }
+      .zread-toc-dash:hover { background: #8b949e; }
+      .zread-toc-dash.active { background: #00b0aa; }
+      .zread-toc-card { background: #161b22; border-color: #30363d; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+      .zread-toc-card-title { color: #e6edf3; }
+      .zread-toc-card-list a { color: #e6edf3; }
+      .zread-toc-card-list a:hover { color: rgba(0,176,170,.9); }
+      .zread-toc-card-list a.active { color: #00b0aa; }
     }
   `
   document.head.appendChild(style)
@@ -425,6 +499,7 @@ async function loadDoc(slug: string) {
   }
 
   // 显示 loading
+  removePageToc()
   container.innerHTML = `<div class="zread-readme-loading"><span class="zread-spinner"></span>${t('loadingDoc')}</div>`
 
   try {
@@ -456,6 +531,9 @@ async function loadDoc(slug: string) {
 
     // 给代码块添加复制按钮（仿 GitHub 原生风格）
     addCodeCopyButtons(container)
+
+    // 页内目录（右侧进度轨 + 悬停卡片）
+    buildPageToc(container)
   } catch (err) {
     console.error('[zread-ext] loadDoc error:', err)
     if (err instanceof Error && err.message === 'CF_CHALLENGE') {
@@ -576,6 +654,7 @@ function addCodeCopyButtons(container: HTMLElement) {
 // ==========================================
 function restoreReadme() {
   selectedDocSlug = null
+  removePageToc()
   const container = findReadmeContainer()
   if (container && originalReadmeHTML !== null) {
     container.innerHTML = originalReadmeHTML
@@ -789,6 +868,7 @@ const GitHubUI = {
   },
 
   cleanup() {
+    removePageToc()
     if (mutationObserver) {
       mutationObserver.disconnect()
       mutationObserver = null

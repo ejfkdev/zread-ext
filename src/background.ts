@@ -5,7 +5,7 @@
 import { detectLocale } from './github/i18n';
 
 // 版本标记：每次发布改这里，控制台可确认扩展是否真的重载了新代码
-const EXT_VERSION = '2.31.1';
+const EXT_VERSION = '2.32.0';
 console.log('[zread-ext] background service worker started, version', EXT_VERSION);
 
 // 缓存键带语言前缀，避免中英文缓存互串
