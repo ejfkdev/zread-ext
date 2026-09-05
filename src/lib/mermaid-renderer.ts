@@ -22,6 +22,10 @@ const ICON_MINUS =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>'
 const ICON_RESET =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>'
+const ICON_COPY =
+  '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 6.216 0 7.75 0h7.5C15.216 0 16 .784 16 1.75v7.5c0 .966-.784 1.75-1.75 1.75h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg>'
+const ICON_CHECK =
+  '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L6 10.28l6.72-6.72a.75.75 0 0 1 1.06 1.06Z"></path></svg>'
 
 // 主题配色
 const THEME = isDark()
@@ -292,6 +296,47 @@ function openViewer(sourceDiv: HTMLElement): void {
   requestAnimationFrame(() => centerAt(fitScale()))
 }
 
+// 渲染失败（图表语法错误等）时，把该块还原为源码代码块，而不是 mermaid 的错误图
+// 复用 ui.tsx 注入的 .zread-code-wrap / .zread-code-copy 样式，观感与正文代码块一致
+function fallbackToCode(div: HTMLElement, source: string): void {
+  const wrap = document.createElement('div')
+  wrap.className = 'zread-code-wrap'
+  const pre = document.createElement('pre')
+  const code = document.createElement('code')
+  code.textContent = source
+  pre.appendChild(code)
+  const btn = document.createElement('button')
+  btn.className = 'zread-code-copy'
+  btn.type = 'button'
+  btn.setAttribute('aria-label', 'Copy code')
+  btn.innerHTML = ICON_COPY
+  btn.addEventListener('click', async (e) => {
+    e.stopPropagation()
+    try {
+      await navigator.clipboard.writeText(source)
+      btn.classList.add('copied')
+      btn.innerHTML = ICON_CHECK
+      btn.setAttribute('aria-label', 'Copied')
+      setTimeout(() => {
+        btn.classList.remove('copied')
+        btn.innerHTML = ICON_COPY
+        btn.setAttribute('aria-label', 'Copy code')
+      }, 1500)
+    } catch (err) {
+      console.log('[zread-ext] copy failed:', err)
+    }
+  })
+  wrap.append(pre, btn)
+  div.replaceWith(wrap)
+}
+
+// mermaid 语法错误时 run 会把节点内容替换成"错误图"（含 Syntax error 文案），用于兜底识别
+function hasErrorDiagram(div: HTMLElement): boolean {
+  const svg = div.querySelector('svg')
+  if (!svg) return false
+  return /syntax error|parse error|error in text/i.test(svg.textContent || '')
+}
+
 // 渲染当前文档内的 mermaid 块；渲染后附加全屏按钮
 export async function renderMermaid(container?: HTMLElement | null): Promise<number> {
   ensureStyles()
@@ -304,12 +349,32 @@ export async function renderMermaid(container?: HTMLElement | null): Promise<num
     securityLevel: 'strict',
     theme: isDark() ? 'dark' : 'neutral',
   })
-  try {
-    await mermaid.run({ nodes: divs })
-  } catch (e) {
-    console.log('[zread-ext] mermaid run failed:', e)
+  // 先逐块 parse：语法错误的块直接显示源码，不参与渲染
+  const runnable: HTMLElement[] = []
+  for (const d of divs) {
+    const src = d.textContent || ''
+    let ok = false
+    try {
+      await mermaid.parse(src)
+      ok = true
+    } catch (e) {
+      console.log('[zread-ext] mermaid parse failed, show source instead:', e)
+    }
+    if (ok) runnable.push(d)
+    else fallbackToCode(d, src)
   }
-  for (const d of divs) addExpandButton(d)
+  // 再逐块 run：parse 通过但渲染仍可能失败，同样回退源码
+  for (const d of runnable) {
+    const src = d.textContent || ''
+    try {
+      await mermaid.run({ nodes: [d] })
+    } catch (e) {
+      console.log('[zread-ext] mermaid run failed, show source instead:', e)
+    }
+    if (!d.isConnected) continue
+    if (hasErrorDiagram(d)) fallbackToCode(d, src)
+    else addExpandButton(d)
+  }
   return divs.length
 }
 
