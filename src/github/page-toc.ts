@@ -84,8 +84,24 @@ function positionRail() {
     readme?.closest('[class*="Box"]') || readme) as HTMLElement | null
   if (!box) return
   const r = box.getBoundingClientRect()
-  // 水平位置：贴着 README 卡片右缘（内侧 4px），不再伸到卡片与右栏之间的缝隙外
-  const x = Math.max(8, Math.min(r.right - 4 - 20, window.innerWidth - 28))
+  // 水平位置：README 卡片与右栏（Packages/About 列）之间的缝隙居中；
+  // 缝隙不可用（右栏换行到下方或视口太窄）时退回卡片右缘内侧
+  const RAIL_W = 20
+  const side = document.querySelector('[class*="Layout-main"] aside, .Layout-sidebar, [class*="RepositoryLayout"] aside, [class*="PageLayout-Pane"]') as HTMLElement | null
+  const s = side ? side.getBoundingClientRect() : null
+  // 右栏内容左缘（Pane 有内边距，缝隙要算到内容而不是 Pane 外框）
+  const inner = (side?.querySelector('[class*="SidebarSection"]') || side?.firstElementChild) as HTMLElement | null
+  let contentLeft = inner ? inner.getBoundingClientRect().left : 0
+  if (!contentLeft && s) contentLeft = s.left + 24
+  let x: number
+  if (s && contentLeft > r.right + RAIL_W + 4 && s.top < r.bottom && s.bottom > r.top) {
+    // 卡片右缘与右栏内容之间的缝隙居中
+    x = r.right + (contentLeft - r.right - RAIL_W) / 2
+  } else {
+    // 缝隙不可用（右栏换行到下方或视口太窄）时退回卡片右缘内侧
+    x = r.right - 4 - RAIL_W
+  }
+  x = Math.max(8, Math.min(x, window.innerWidth - RAIL_W - 8))
   railEl.style.left = `${x}px`
   cardEl.style.left = `${x + 28}px` // 卡片在轨道右侧展开
   const cramped = r.right + 70 > window.innerWidth
