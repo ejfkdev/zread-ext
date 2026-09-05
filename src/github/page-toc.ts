@@ -84,8 +84,8 @@ function positionRail() {
     readme?.closest('[class*="Box"]') || readme) as HTMLElement | null
   if (!box) return
   const r = box.getBoundingClientRect()
-  // 水平位置：README 卡片右缘外 24px；视口放不下则隐藏
-  const x = Math.min(r.right + 24, window.innerWidth - 28)
+  // 水平位置：贴着 README 卡片右缘（内侧 4px），不再伸到卡片与右栏之间的缝隙外
+  const x = Math.max(8, Math.min(r.right - 4 - 20, window.innerWidth - 28))
   railEl.style.left = `${x}px`
   cardEl.style.left = `${x + 28}px` // 卡片在轨道右侧展开
   const cramped = r.right + 70 > window.innerWidth
