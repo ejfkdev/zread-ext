@@ -502,13 +502,16 @@ async function loadDoc(slug: string) {
   container.innerHTML = `<div class="zread-readme-loading"><span class="zread-spinner"></span>${t('loadingDoc')}</div>`
 
   try {
-    const response = await new Promise<{ page?: { markdown?: string }; error?: string }>((resolve) => {
+    const response = await new Promise<{ page?: { markdown?: string }; error?: string }>((resolve, reject) => {
       chrome.runtime.sendMessage(
         { type: 'zreadReadPage', repo: `${currentRepo!.owner}/${currentRepo!.repo}`, slug },
-        (res) => resolve(res as { page?: { markdown?: string }; error?: string })
+        (res) => {
+          // lastError 必须在回调内读取：回调外可能读到上一次调用的残留值
+          if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message))
+          else resolve(res as { page?: { markdown?: string }; error?: string })
+        }
       )
     })
-    if (chrome.runtime.lastError) throw new Error(chrome.runtime.lastError.message)
     if (response?.error === 'CF_CHALLENGE') throw new Error('CF_CHALLENGE')
     if (response?.error) throw new Error(response.error)
 

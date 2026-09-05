@@ -116,6 +116,7 @@ export default function DocPanel({ repo, onDocClick }: DocPanelProps) {
   // 查询后台运行中的扩展版本，用于确认是否重载了新代码
   useEffect(() => {
     chrome.runtime.sendMessage({ type: 'zreadPing' }, (res) => {
+      if (chrome.runtime.lastError) return
       if (res?.version) setVersion(res.version)
     })
   }, [])
@@ -127,13 +128,16 @@ export default function DocPanel({ repo, onDocClick }: DocPanelProps) {
     setEta(null)
     const fetchOutline = async () => {
       try {
-        const response = await new Promise<any>((resolve) => {
+        const response = await new Promise<any>((resolve, reject) => {
           chrome.runtime.sendMessage(
             { type: 'zreadReadOutline', repo },
-            (res) => resolve(res)
+            (res) => {
+              // lastError 必须在回调内读取：回调外可能读到上一次调用的残留值
+              if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message))
+              else resolve(res)
+            }
           )
         })
-        if (chrome.runtime.lastError) throw new Error(chrome.runtime.lastError.message)
         if (response?.error === 'CF_CHALLENGE') throw new Error('CF_CHALLENGE')
         if (response?.error) throw new Error(response.error)
 

@@ -5,7 +5,7 @@
 import { detectLocale } from './github/i18n';
 
 // 版本标记：每次发布改这里，控制台可确认扩展是否真的重载了新代码
-const EXT_VERSION = '2.32.5';
+const EXT_VERSION = '2.32.6';
 console.log('[zread-ext] background service worker started, version', EXT_VERSION);
 
 // 缓存键带语言前缀，避免中英文缓存互串
@@ -21,6 +21,34 @@ function outlineKey(repo: string): string {
 }
 function pageKey(repo: string, slug: string): string {
   return `pc:${CACHE_KEY_V}:${contentLocale()}:${repo}::${slug}`;
+}
+
+// ==========================================
+// chrome.storage.session：SW 被 Chrome 回收重启后仍在（浏览器关闭才清），
+// 用于存放"丢了会出错"的瞬态状态（隐藏标签 id、提交冷却、预取进度）。
+// 纯内存缓存在下面另行标注（statusMemo/inFlight 丢了只是多发请求，可接受）。
+// ==========================================
+async function sessionGet<T>(key: string): Promise<T | undefined> {
+  try {
+    const r = await chrome.storage.session.get(key);
+    return r?.[key] as T | undefined;
+  } catch {
+    return undefined;
+  }
+}
+async function sessionSet(key: string, value: unknown): Promise<void> {
+  try {
+    await chrome.storage.session.set({ [key]: value });
+  } catch (e) {
+    console.log('[zread-ext] session set failed:', key, String(e));
+  }
+}
+async function sessionRemove(key: string): Promise<void> {
+  try {
+    await chrome.storage.session.remove(key);
+  } catch {
+    /* ignore */
+  }
 }
 
 // ==========================================
@@ -144,22 +172,24 @@ async function getZreadTabCandidates(): Promise<chrome.tabs.Tab[]> {
   return withId;
 }
 
-// 隐藏代理标签页单例：并发调用共享同一次创建，已存在则直接复用，避免标签页累积
-let hiddenProxyTabId: number | null = null;
+// 隐藏代理标签页单例：id 存 session storage，SW 重启后仍能复用同一个标签，
+// 避免重启丢失引用后重复创建、隐藏标签累积。并发调用共享同一次创建。
+const HIDDEN_TAB_KEY = 'hiddenProxyTabId';
 let hiddenTabCreating: Promise<chrome.tabs.Tab | null> | null = null;
 
 async function ensureHiddenZreadTab(): Promise<chrome.tabs.Tab | null> {
-  if (hiddenProxyTabId != null) {
+  const saved = await sessionGet<number>(HIDDEN_TAB_KEY);
+  if (saved != null) {
     try {
-      return await chrome.tabs.get(hiddenProxyTabId);
+      return await chrome.tabs.get(saved);
     } catch {
-      hiddenProxyTabId = null;
+      await sessionRemove(HIDDEN_TAB_KEY);
     }
   }
   if (!hiddenTabCreating) {
     hiddenTabCreating = (async () => {
       const tab = await chrome.tabs.create({ url: 'https://zread.ai/', active: false });
-      hiddenProxyTabId = tab.id ?? null;
+      if (tab.id != null) await sessionSet(HIDDEN_TAB_KEY, tab.id);
       return tab;
     })();
     void hiddenTabCreating
@@ -173,7 +203,9 @@ async function ensureHiddenZreadTab(): Promise<chrome.tabs.Tab | null> {
 
 // 隐藏标签页被关闭时清掉引用，下次需要时重建
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (tabId === hiddenProxyTabId) hiddenProxyTabId = null;
+  void (async () => {
+    if (tabId === (await sessionGet<number>(HIDDEN_TAB_KEY))) await sessionRemove(HIDDEN_TAB_KEY);
+  })();
 });
 
 // 在指定标签里发起同站 fetch（浏览器自动带全部 cookie）
@@ -606,20 +638,23 @@ async function fetchRepoEta(): Promise<{ backlog: number; estimate_minutes: numb
 // 冷却去重：同一仓库同模式在冷却期内只真正提交一次，避免 UI 重复触发/重复刷新。
 // ==========================================
 const SUBMIT_COOLDOWN = 24 * 60 * 60 * 1000; // 1 天
-const lastSubmitAt = new Map<string, number>();
+const COOLDOWN_KEY = 'submitCooldownAt';
 
-function submitOnCooldown(repo: string, mode: 'index' | 'refresh'): boolean {
-  const key = `${mode}:${repo}`;
-  const last = lastSubmitAt.get(key);
+// 冷却时间戳存 session storage：SW 重启后冷却仍然有效，不会重复提交
+async function submitOnCooldown(repo: string, mode: 'index' | 'refresh'): Promise<boolean> {
+  const map = (await sessionGet<Record<string, number>>(COOLDOWN_KEY)) || {};
+  const last = map[`${mode}:${repo}`];
   return !!(last && Date.now() - last < SUBMIT_COOLDOWN); // 冷却中 => 视为已提交，跳过
 }
 
-function markSubmitted(repo: string, mode: 'index' | 'refresh'): void {
-  lastSubmitAt.set(`${mode}:${repo}`, Date.now());
+async function markSubmitted(repo: string, mode: 'index' | 'refresh'): Promise<void> {
+  const map = (await sessionGet<Record<string, number>>(COOLDOWN_KEY)) || {};
+  map[`${mode}:${repo}`] = Date.now();
+  await sessionSet(COOLDOWN_KEY, map);
 }
 
 async function submitIndexOrRefresh(repo: string, mode: 'index' | 'refresh'): Promise<boolean> {
-  if (submitOnCooldown(repo, mode)) {
+  if (await submitOnCooldown(repo, mode)) {
     console.log('[zread-ext] submit', mode, 'skipped (cooldown):', repo);
     return true;
   }
@@ -634,7 +669,7 @@ async function submitIndexOrRefresh(repo: string, mode: 'index' | 'refresh'): Pr
       const json = JSON.parse(res.text);
       const ok = json?.code === 0;
       console.log('[zread-ext] submit index', repo, '->', ok);
-      if (ok) markSubmitted(repo, mode);
+      if (ok) await markSubmitted(repo, mode);
       return ok;
     } else {
       const info = await checkRepoStatus(repo);
@@ -646,7 +681,7 @@ async function submitIndexOrRefresh(repo: string, mode: 'index' | 'refresh'): Pr
       });
       const ok = res.status < 300;
       console.log('[zread-ext] submit refresh', repo, '->', ok);
-      if (ok) markSubmitted(repo, mode);
+      if (ok) await markSubmitted(repo, mode);
       return ok;
     }
   } catch (e) {
@@ -694,7 +729,7 @@ async function revalidateOutline(repo: string, key: string, cached: CacheEntry):
     const data = await fetchOutlineLive(repo);
     if (data?.outline?.length) {
       const slugs = [...data.outline].sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0)).map((p: any) => p.slug);
-      if (slugs.length) startPrefetch(repo, slugs);
+      if (slugs.length) void startPrefetch(repo, slugs);
     }
   } catch (e) {
     console.log('[zread-ext] background revalidate error:', String(e));
@@ -1075,22 +1110,39 @@ function notifyInFlight(key: string): void {
 
 // ==========================================
 // 预取调度器：目录就绪后按顺序串行预取并缓存文档
-// 第一个立即抓取，之后每隔 PREFETCH_INTERVAL 抓下一个；
+// SW 存活期间用 setTimeout 维持 5s 间隔；队列进度持久化在 session storage，
+// 并用 1 分钟周期的看门狗 alarm 兜底：SW 被回收重启后（定时器丢失），
+// alarm 或任意唤醒事件会把链条重新接上，预取不会静默死掉。
 // 跳过已缓存/在途的；用户点击的优先（不与其冲突）；
 // 遇到人机挑战或连续失败则停止，避免无效轰炸。
 // ==========================================
 const PREFETCH_INTERVAL = 5000;
+const PREFETCH_QUEUE_KEY = 'prefetchQueue';
+const PREFETCH_ALARM = 'zread-prefetch-watchdog';
 
-interface PrefetchState {
+interface PrefetchQueue {
   repo: string;
   slugs: string[];
   index: number;
+  consecFail: number;
+}
+interface PrefetchState extends PrefetchQueue {
   timer: ReturnType<typeof setTimeout> | null;
   status: any;
-  consecFail: number;
   stopped: boolean;
 }
 let prefetchState: PrefetchState | null = null;
+
+async function savePrefetchQueue(): Promise<void> {
+  if (!prefetchState) return;
+  const q: PrefetchQueue = {
+    repo: prefetchState.repo,
+    slugs: prefetchState.slugs,
+    index: prefetchState.index,
+    consecFail: prefetchState.consecFail,
+  };
+  await sessionSet(PREFETCH_QUEUE_KEY, q);
+}
 
 function stopPrefetch(): void {
   if (prefetchState) {
@@ -1098,15 +1150,20 @@ function stopPrefetch(): void {
     if (prefetchState.timer) clearTimeout(prefetchState.timer);
   }
   prefetchState = null;
+  void chrome.alarms.clear(PREFETCH_ALARM);
+  void sessionRemove(PREFETCH_QUEUE_KEY);
 }
 
-function startPrefetch(repo: string, slugs: string[]): void {
+async function startPrefetch(repo: string, slugs: string[]): Promise<void> {
   stopPrefetch();
-  const state: PrefetchState = { repo, slugs, index: 0, timer: null, status: null, consecFail: 0, stopped: false };
+  const state: PrefetchState = { repo, slugs, index: 0, consecFail: 0, timer: null, status: null, stopped: false };
   prefetchState = state;
+  await savePrefetchQueue();
+  // 看门狗：SW 重启后 1 分钟内必然唤醒一次，用来接回预取链条
+  chrome.alarms.create(PREFETCH_ALARM, { delayInMinutes: 1, periodInMinutes: 1 });
   console.log('[zread-ext] prefetch start:', repo, 'docs:', slugs.length);
   // 第一个立即开始（先拿一次状态供后续复用）
-  (async () => {
+  void (async () => {
     state.status = await checkRepoStatus(repo);
     // 页面刷新/重开时跳过"已有缓存"的，从第一个没缓存的开始（不按 updated_at 判新鲜，保证续传）
     while (state.index < state.slugs.length) {
@@ -1117,10 +1174,33 @@ function startPrefetch(repo: string, slugs: string[]): void {
         break;
       }
     }
+    await savePrefetchQueue();
     console.log('[zread-ext] prefetch resume at index', state.index, '/', slugs.length);
     prefetchTick(state, 0);
   })();
 }
+
+// SW 重启后由看门狗 alarm / 启动事件调用：内存链条已死但队列未完 => 重建链条
+async function resumePrefetchIfNeeded(): Promise<void> {
+  if (prefetchState) return; // 链条还活着
+  const q = await sessionGet<PrefetchQueue>(PREFETCH_QUEUE_KEY);
+  if (!q || !Array.isArray(q.slugs) || q.index >= q.slugs.length) return;
+  const state: PrefetchState = { ...q, timer: null, status: null, stopped: false };
+  prefetchState = state;
+  chrome.alarms.create(PREFETCH_ALARM, { delayInMinutes: 1, periodInMinutes: 1 });
+  console.log('[zread-ext] prefetch resumed after SW restart at index', q.index, '/', q.slugs.length);
+  void (async () => {
+    state.status = await checkRepoStatus(q.repo);
+    prefetchTick(state, 0);
+  })();
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== PREFETCH_ALARM) return;
+  void resumePrefetchIfNeeded();
+});
+// SW 每次被唤醒都会执行顶层代码：有未完成的持久队列就接上
+void resumePrefetchIfNeeded();
 
 function prefetchTick(state: PrefetchState, delay: number): void {
   if (state.stopped || prefetchState !== state) return;
@@ -1153,6 +1233,7 @@ async function prefetchStep(state: PrefetchState): Promise<void> {
     await fetchPage(state.repo, slug, state.status, false);
     state.consecFail = 0;
     console.log('[zread-ext] prefetch cached:', slug);
+    await savePrefetchQueue();
     prefetchTick(state, PREFETCH_INTERVAL);
   } catch (e) {
     if (e instanceof CfChallengeError) {
@@ -1167,6 +1248,7 @@ async function prefetchStep(state: PrefetchState): Promise<void> {
       stopPrefetch();
       return;
     }
+    await savePrefetchQueue();
     prefetchTick(state, PREFETCH_INTERVAL);
   }
 }
@@ -1194,8 +1276,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.type) return false;
 
   if (message.type === 'zreadReadOutline') {
-    fetchOutline(message.repo)
-      .then((data) =>
+    (async () => {
+      try {
+        const data = await fetchOutline(message.repo);
         sendResponse({
           outline: data.outline,
           wiki_id: data.wiki_id,
@@ -1204,33 +1287,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           inProgress: data.inProgress,
           stale: data.stale,
           eta: data.eta,
-        })
-      )
-      .catch((err) => {
-        console.error('[zread-ext] outline error:', err?.message || err);
+        });
+      } catch (err) {
+        console.error('[zread-ext] outline error:', (err as Error)?.message || err);
         sendResponse(errPayload(err));
-      });
+      }
+    })();
     return true;
   }
 
   if (message.type === 'zreadSubmit') {
     // mode: 'index' | 'refresh'
-    submitIndexOrRefresh(message.repo, message.mode || 'index')
-      .then((ok) => sendResponse({ ok }))
-      .catch((err) => {
+    (async () => {
+      try {
+        const ok = await submitIndexOrRefresh(message.repo, message.mode || 'index');
+        sendResponse({ ok });
+      } catch (err) {
         if (err instanceof CfChallengeError) sendResponse({ ok: false, ...errPayload(err) });
         else sendResponse({ ok: false });
-      });
+      }
+    })();
     return true;
   }
 
   if (message.type === 'zreadReadPage') {
-    fetchPage(message.repo, message.slug)
-      .then((page) => sendResponse({ page }))
-      .catch((err) => {
-        console.error('[zread-ext] page error:', err?.message || err);
+    (async () => {
+      try {
+        const page = await fetchPage(message.repo, message.slug);
+        sendResponse({ page });
+      } catch (err) {
+        console.error('[zread-ext] page error:', (err as Error)?.message || err);
         sendResponse(errPayload(err));
-      });
+      }
+    })();
     return true;
   }
 
@@ -1240,20 +1329,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: false });
       return false;
     }
-    chrome.scripting
-      .executeScript({ target: { tabId }, files: [MERMAID_RENDERER_FILE] })
-      .then(() => sendResponse({ ok: true }))
-      .catch((e) => {
+    (async () => {
+      try {
+        await chrome.scripting.executeScript({ target: { tabId }, files: [MERMAID_RENDERER_FILE] });
+        sendResponse({ ok: true });
+      } catch (e) {
         console.log('[zread-ext] inject mermaid renderer failed:', e);
         sendResponse({ ok: false });
-      });
+      }
+    })();
     return true;
   }
 
   if (message.type === 'zreadPrefetch') {
     // 目录就绪后，按顺序串行预取并缓存文档
     if (Array.isArray(message.slugs) && message.slugs.length) {
-      startPrefetch(message.repo, message.slugs);
+      void startPrefetch(message.repo, message.slugs);
     }
     sendResponse({ ok: true });
     return false;
@@ -1261,7 +1352,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'zreadOpenSite') {
     // UI 请求打开 zread.ai 让用户过人机验证
-    chrome.tabs.create({ url: 'https://zread.ai/', active: true });
+    void chrome.tabs.create({ url: 'https://zread.ai/', active: true });
     sendResponse({ ok: true });
     return false;
   }
