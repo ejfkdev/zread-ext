@@ -2,20 +2,23 @@
   "private": true,
   "name": "zread-github-ext",
   "description": "在 GitHub 仓库页面直接查看 zread.ai 文档，左侧目录切换内容，复用 README 区域显示。",
-  "version": "2.32.7",
+  "version": "2.32.8",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "extension dev",
     "start": "extension start",
-    "build": "extension build && npm run build:mermaid",
+    "build": "extension build && npm run build:mermaid && npm run build:proxy",
     "build:mermaid": "esbuild src/lib/mermaid-renderer.ts --bundle --format=iife --minify --outfile=dist/chromium/mermaid_renderer.js",
     "build:mermaid:firefox": "esbuild src/lib/mermaid-renderer.ts --bundle --format=iife --minify --outfile=dist/firefox/mermaid_renderer.js",
     "build:mermaid:edge": "esbuild src/lib/mermaid-renderer.ts --bundle --format=iife --minify --outfile=dist/edge/mermaid_renderer.js",
     "preview": "extension preview",
-    "build:chrome": "extension build --browser chrome && npm run build:mermaid",
-    "build:firefox": "extension build --browser firefox && npm run build:mermaid:firefox",
-    "build:edge": "extension build --browser edge && npm run build:mermaid:edge"
+    "build:chrome": "extension build --browser chrome && npm run build:mermaid && npm run build:proxy",
+    "build:firefox": "extension build --browser firefox && npm run build:mermaid:firefox && npm run build:proxy:firefox",
+    "build:edge": "extension build --browser edge && npm run build:mermaid:edge && npm run build:proxy:edge",
+    "build:proxy": "esbuild src/github/proxy-fetch.ts --bundle --format=iife --minify --outfile=dist/chromium/github/proxy-fetch.js",
+    "build:proxy:firefox": "esbuild src/github/proxy-fetch.ts --bundle --format=iife --minify --outfile=dist/firefox/github/proxy-fetch.js",
+    "build:proxy:edge": "esbuild src/github/proxy-fetch.ts --bundle --format=iife --minify --outfile=dist/edge/github/proxy-fetch.js"
   },
   "dependencies": {
     "dompurify": "^3.4.14",

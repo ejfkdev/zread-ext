@@ -5,7 +5,7 @@
 import { detectLocale } from './github/i18n';
 
 // 版本标记：每次发布改这里，控制台可确认扩展是否真的重载了新代码
-const EXT_VERSION = '2.32.7';
+const EXT_VERSION = '2.32.8';
 console.log('[zread-ext] background service worker started, version', EXT_VERSION);
 
 // 缓存键带语言前缀，避免中英文缓存互串
@@ -54,24 +54,36 @@ async function sessionRemove(key: string): Promise<void> {
 // ==========================================
 // 认证：读取应用层 cookie（token）并拼普通 Cookie 头；
 // locale 由浏览器语言决定：仅中文浏览器用 zh，其余 en（含界面文案与 zread 内容）。
-// 注意：分区 cookie（cf_clearance）chrome.cookies 读不到，
-// 后台直连若被 Cloudflare 拦截，会自动降级到页面代理请求。
+// cf_clearance 是分区 cookie（Partitioned，top-level=zread.ai），普通 getAll 读不到，
+// 需带 partitionKey 查询；拼进 Cookie 头后后台直连即可通过 Cloudflare，
+// 绝大多数情况下不再需要任何代理载体（屏幕外窗口仅作兜底）。
 // ==========================================
-function getZreadAuth(): Promise<{ token: string | null; locale: string; cookieHeader: string }> {
-  return new Promise((resolve) => {
-    chrome.cookies.getAll({ url: 'https://zread.ai' }, (cookies) => {
-      let token: string | null = null;
-      let cookieHeader = '';
-      for (const c of cookies) {
-        if (cookieHeader) cookieHeader += '; ';
-        cookieHeader += `${c.name}=${c.value}`;
-        if (c.name === 'CGX_AUTH_TOKEN') token = c.value;
-      }
-      // 仅识别到中文才用 zh，否则 en
-      const locale = detectLocale() === 'zh' ? 'zh' : 'en';
-      resolve({ token, locale, cookieHeader });
-    });
-  });
+async function getZreadAuth(): Promise<{ token: string | null; locale: string; cookieHeader: string }> {
+  let cookies: chrome.cookies.Cookie[] = [];
+  try {
+    cookies = await chrome.cookies.getAll({ url: 'https://zread.ai' });
+  } catch {
+    cookies = [];
+  }
+  let partitioned: chrome.cookies.Cookie[] = [];
+  try {
+    partitioned = await chrome.cookies.getAll({ partitionKey: { topLevelSite: 'https://zread.ai' } });
+  } catch {
+    partitioned = []; // 旧版 Chrome 不支持 partitionKey：仅丢 cf_clearance，仍有降级链
+  }
+  let token: string | null = null;
+  let cookieHeader = '';
+  const seen = new Set<string>();
+  for (const c of [...cookies, ...partitioned]) {
+    if (seen.has(c.name)) continue;
+    seen.add(c.name);
+    if (cookieHeader) cookieHeader += '; ';
+    cookieHeader += `${c.name}=${c.value}`;
+    if (c.name === 'CGX_AUTH_TOKEN') token = c.value;
+  }
+  // 仅识别到中文才用 zh，否则 en
+  const locale = detectLocale() === 'zh' ? 'zh' : 'en';
+  return { token, locale, cookieHeader };
 }
 
 // ==========================================
@@ -128,12 +140,13 @@ function isChallengeStatus(s: number): boolean {
 }
 
 // ==========================================
-// 页面代理：在健康的 zread.ai 标签里发起同站请求
-// ==========================================
-
-// ==========================================
-// 核心代理请求：在 zread.ai 标签页上下文里发起 fetch
-// 浏览器自动携带该站全部 cookie（含分区 cf_clearance）
+// 同站代理：绝不创建用户可见的标签页
+// 后台直连被 Cloudflare 拦截时，把请求交给一个"屏幕外窗口"里的 zread.ai 页面：
+// 该窗口 left/top 设为 -32000（完全在可见屏幕之外）、不抢焦点，对用户不可见，
+// 但它是 zread.ai 的顶层浏览上下文，其中的同源 fetch 自动携带全部 cookie
+// （含 SW 读不到的分区 cf_clearance）——这是不产生可见标签页的唯一可行载体
+// （cookie 只在 zread.ai 为顶层站点时发送，iframe/扩展页/GitHub 页注入均不可行，已实测）。
+// 窗口 id 存 session storage，SW 重启后复用；全部被真人机挑战拦截 => CfChallengeError。
 // ==========================================
 interface ZreadResponse {
   status: number;
@@ -153,165 +166,129 @@ function b64ToBytes(b64: string): Uint8Array {
   return bytes;
 }
 
-// 判断一个 zread.ai 标签是否"健康"（不是错误页/挑战页/API 页）
-function tabLooksHealthy(t: chrome.tabs.Tab): boolean {
-  const title = (t.title || '').toLowerCase();
-  if (!title) return false; // 无标题 => 还在加载或异常
-  const bad = ['504', '503', '502', 'gateway', 'just a moment', 'checking', 'attention required', 'bad gateway', 'error'];
-  if (bad.some((b) => title.includes(b))) return false;
-  // 停在 API 端点上的标签（显示原始 JSON）不适合做代理
-  if (t.url && /\/api\//.test(t.url)) return false;
-  return true;
+const PROXY_FETCH_FILE = 'github/proxy-fetch.js';
+const proxyInjected = new Set<number>();
+
+// 向代理页注入主世界 fetch 助手（幂等：__zreadProxyFetch 已存在则跳过）
+async function injectProxyFetcher(tabId: number): Promise<boolean> {
+  try {
+    const probe = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      world: 'MAIN',
+      func: () => typeof (globalThis as any).__zreadProxyFetch === 'function',
+    });
+    if (probe?.[0]?.result) {
+      proxyInjected.add(tabId);
+      return true;
+    }
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      world: 'MAIN',
+      files: [PROXY_FETCH_FILE],
+    });
+    proxyInjected.add(tabId);
+    return true;
+  } catch (e) {
+    console.log('[zread-ext] inject proxy fetcher failed for tab', tabId, String(e));
+    return false;
+  }
 }
 
-// 返回候选标签列表：健康的排前面
-async function getZreadTabCandidates(): Promise<chrome.tabs.Tab[]> {
-  const tabs = await chrome.tabs.query({ url: ['https://zread.ai/*'] });
-  const withId = tabs.filter((t) => t.id != null);
-  withId.sort((a, b) => Number(tabLooksHealthy(b)) - Number(tabLooksHealthy(a)));
-  return withId;
-}
+// 屏幕外代理窗口单例：id 存 session storage，SW 重启后复用同一个窗口
+const PROXY_WINDOW_KEY = 'proxyWindowId';
+let proxyWindowCreating: Promise<chrome.windows.Window | null> | null = null;
 
-// 隐藏代理标签页单例：id 存 session storage，SW 重启后仍能复用同一个标签，
-// 避免重启丢失引用后重复创建、隐藏标签累积。并发调用共享同一次创建。
-const HIDDEN_TAB_KEY = 'hiddenProxyTabId';
-let hiddenTabCreating: Promise<chrome.tabs.Tab | null> | null = null;
-
-async function ensureHiddenZreadTab(): Promise<chrome.tabs.Tab | null> {
-  const saved = await sessionGet<number>(HIDDEN_TAB_KEY);
+async function ensureProxyWindow(): Promise<number | null> {
+  const saved = await sessionGet<number>(PROXY_WINDOW_KEY);
   if (saved != null) {
     try {
-      return await chrome.tabs.get(saved);
+      const win = await chrome.windows.get(saved, { windowTypes: ['normal'] });
+      const [tab] = win.tabs || [];
+      if (tab?.id != null) return tab.id;
     } catch {
-      await sessionRemove(HIDDEN_TAB_KEY);
+      await sessionRemove(PROXY_WINDOW_KEY);
     }
   }
-  if (!hiddenTabCreating) {
-    hiddenTabCreating = (async () => {
-      const tab = await chrome.tabs.create({ url: 'https://zread.ai/', active: false });
-      if (tab.id != null) {
-        await sessionSet(HIDDEN_TAB_KEY, tab.id);
-        // 收进折叠的标签组，避免这个后台工作标签在标签栏里看起来像"扩展又开了个网页"
-        try {
-          const gid = await chrome.tabs.group({ tabIds: [tab.id] });
-          await chrome.tabGroups.update(gid, { collapsed: true, title: 'Zread 文档代理' });
-        } catch {
-          /* 不支持分组时保持普通后台标签 */
-        }
-      }
-      return tab;
+  let creating = proxyWindowCreating;
+  if (!creating) {
+    creating = (async (): Promise<chrome.windows.Window | null> => {
+      const win =
+        (await chrome.windows.create({
+          url: 'https://zread.ai/',
+          focused: false,
+          // 屏幕外：用户看不见；不能用 minimized（部分平台会延迟加载/冻结页面）
+          left: -32000,
+          top: -32000,
+          width: 800,
+          height: 600,
+        })) ?? null;
+      if (win && win.id != null) await sessionSet(PROXY_WINDOW_KEY, win.id);
+      return win;
     })();
-    void hiddenTabCreating
+    proxyWindowCreating = creating;
+    void creating
       .catch(() => {})
       .finally(() => {
-        hiddenTabCreating = null;
+        proxyWindowCreating = null;
       });
   }
-  return hiddenTabCreating;
+  const win = await creating;
+  if (win?.id == null) return null;
+  // 等页面加载稳定（Cloudflare 放行）
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      const w = await chrome.windows.get(win.id, { windowTypes: ['normal'] });
+      const [tab] = w.tabs || [];
+      const title = (tab?.title || '').toLowerCase();
+      if (title && !/just a moment|checking|attention required/.test(title)) return tab?.id ?? null;
+    } catch {
+      return null;
+    }
+  }
+  const w = await chrome.windows.get(win.id, { windowTypes: ['normal'] }).catch(() => null);
+  return w?.tabs?.[0]?.id ?? null;
 }
 
-// 隐藏标签页被关闭时清掉引用，下次需要时重建
-chrome.tabs.onRemoved.addListener((tabId) => {
+// 代理窗口被关闭时清掉引用，下次需要时重建
+chrome.windows.onRemoved.addListener((windowId) => {
   void (async () => {
-    if (tabId === (await sessionGet<number>(HIDDEN_TAB_KEY))) await sessionRemove(HIDDEN_TAB_KEY);
+    if (windowId === (await sessionGet<number>(PROXY_WINDOW_KEY))) await sessionRemove(PROXY_WINDOW_KEY);
   })();
 });
 
-// 启动时把已存在但尚未分组的代理标签收进折叠组：
-//  - session 里已有 id（SW 重启）：直接补组；
-//  - 扩展重载会清空 session：认领"非激活、地址恰为 zread.ai 根、未分组"的遗留标签。
-void (async () => {
-  const collapse = async (tabId: number) => {
-    try {
-      const gid = await chrome.tabs.group({ tabIds: [tabId] });
-      await chrome.tabGroups.update(gid, { collapsed: true, title: 'Zread 文档代理' });
-    } catch {
-      /* 不支持分组时保持普通后台标签 */
-    }
-  };
-  const saved = await sessionGet<number>(HIDDEN_TAB_KEY);
-  if (saved != null) {
-    try {
-      const tab = await chrome.tabs.get(saved);
-      if ((tab.groupId ?? -1) === -1) await collapse(saved);
-      return;
-    } catch {
-      await sessionRemove(HIDDEN_TAB_KEY);
-    }
-  }
-  const tabs = await chrome.tabs.query({ url: 'https://zread.ai/' });
-  const orphan = tabs.find((t) => !t.active && (t.groupId ?? -1) === -1 && t.id != null);
-  if (orphan?.id != null) {
-    await sessionSet(HIDDEN_TAB_KEY, orphan.id);
-    await collapse(orphan.id);
-  }
-})();
-
-// 在指定标签里发起同站 fetch（浏览器自动带全部 cookie）
-async function zreadFetchInTab(
+// 在代理页主世界里发同源 fetch（浏览器自动带全部 cookie）
+async function zreadFetchInProxyPage(
   tabId: number,
   url: string,
   init: { method?: string; headers?: Record<string, string>; body?: string; asBytes?: boolean } = {}
 ): Promise<ZreadResponse> {
+  if (!proxyInjected.has(tabId)) {
+    const ok = await injectProxyFetcher(tabId);
+    if (!ok) throw new Error('proxy fetcher not available');
+  }
   const method = init.method || 'GET';
   const headers = init.headers || {};
   const body = init.body ?? null;
   const asBytes = init.asBytes === true;
-
   const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: async (u: string, m: string, h: Record<string, string>, b: string | null, wantBytes: boolean) => {
-      const meta = { pageUrl: location.href, pageTitle: document.title };
-      try {
-        // 若本标签已加载目标 HTML 页（含 flight 数据），直接读 DOM，避免再发一次可能 504 的请求
-        // 注意：RSC 请求（带 rsc 头）不能走 DOM 读取，必须真实请求
-        if (m === 'GET' && !b && !/\/api\//.test(u) && !h['RSC']) {
-          try {
-            const targetPath = new URL(u).pathname.replace(/\/+$/, '');
-            const herePath = location.pathname.replace(/\/+$/, '');
-            const hasFlight = Array.isArray((self as any).__next_f) || document.documentElement.innerHTML.includes('__next_f');
-            if (targetPath === herePath && hasFlight) {
-              return { status: 200, ok: true, text: document.documentElement.outerHTML, ...meta };
-            }
-          } catch {}
-        }
-        if (!h['Authorization']) {
-          const cm = document.cookie.match(/(?:^|;\s*)CGX_AUTH_TOKEN=([^;]+)/);
-          if (cm && cm[1]) h['Authorization'] = `Bearer ${cm[1]}`;
-        }
-        const res = await fetch(u, {
-          method: m,
-          headers: h,
-          body: b,
-          credentials: 'include',
-          redirect: 'follow',
-        });
-        if (wantBytes) {
-          const buf = await res.arrayBuffer();
-          const bytes = new Uint8Array(buf);
-          let bin = '';
-          const c = 0x8000;
-          for (let i = 0; i < bytes.length; i += c) {
-            bin += String.fromCharCode(...bytes.subarray(i, i + c));
-          }
-          return { status: res.status, ok: res.ok, text: '', b64: btoa(bin), ...meta };
-        }
-        const text = await res.text();
-        return { status: res.status, ok: res.ok, text, ...meta };
-      } catch (e) {
-        return { status: 0, ok: false, text: '', error: String(e), ...meta };
-      }
-    },
+    target: { tabId, allFrames: false },
+    world: 'MAIN',
+    func: (u: string, m: string, h: Record<string, string>, b: string | null, wantBytes: boolean) =>
+      (globalThis as any).__zreadProxyFetch(u, m, h, b, wantBytes),
     args: [url, method, headers, body, asBytes],
   });
-
   const r = results?.[0]?.result as ZreadResponse | undefined;
-  console.log('[zread-ext] page fetch in tab', tabId, ': status', r?.status, 'tabUrl', r?.pageUrl, 'tabTitle', r?.pageTitle, '->', url);
-  if (!r) throw new Error('zread tab returned no result');
+  console.log('[zread-ext] proxy fetch in offscreen page, tab', tabId, ': status', r?.status, '->', url);
+  if (!r) {
+    proxyInjected.delete(tabId); // 页面可能导航过，下次重新注入
+    throw new Error('proxy page returned no result');
+  }
+  if (r.status === 0) proxyInjected.delete(tabId);
   return r;
 }
 
-// 页面代理响应是否"可用"：200 且正文不是挑战页、所在标签不是错误页
+// 代理响应是否"可用"：200 且正文不是挑战页、来源页不是错误页
 function pageResultUsable(r: ZreadResponse): boolean {
   if (r.status !== 200) return false;
   if (isCfChallengeText(r.text)) return false;
@@ -321,7 +298,7 @@ function pageResultUsable(r: ZreadResponse): boolean {
   return true;
 }
 
-// 页面代理响应是否为"真人机挑战"（用于决定是否提示用户过验证）
+// 代理响应是否为"真人机挑战"（用于决定是否提示用户过验证）
 function pageResultIsChallenge(r: ZreadResponse): boolean {
   if (isCfChallengeText(r.text)) return true;
   if (isChallengeTitle(r.pageTitle || '')) return true;
@@ -395,73 +372,66 @@ async function zreadFetchSmart(
     url
   );
 
-  // —— 2) 页面代理：在健康的 zread.ai 标签里发同站请求 ——
+  // —— 2) 同站代理：屏幕外窗口里的 zread.ai 页面（对用户不可见） ——
   const pageHeaders = buildHeaders(token, locale, init.headers);
 
-  const attemptPageProxy = async (): Promise<{ ok: ZreadResponse | null; last: ZreadResponse | null; sawChallenge: boolean }> => {
-    let candidates = await getZreadTabCandidates();
-    console.log('[zread-ext] page proxy candidates:', candidates.map((t) => `${t.id}(${t.title || ''})`).join(', '));
-
-    // 没有现成标签时创建/复用唯一的隐藏标签
-    if (candidates.length === 0) {
-      console.log('[zread-ext] no zread.ai tab, ensuring hidden one');
-      const tab = await ensureHiddenZreadTab();
-      await new Promise((r) => setTimeout(r, 1500)); // 等 Cloudflare/页面稳定
-      if (tab?.id != null) candidates = [tab];
-    }
-
+  const attemptProxy = async (): Promise<{ ok: ZreadResponse | null; last: ZreadResponse | null; sawChallenge: boolean }> => {
     let last: ZreadResponse | null = null;
     let sawChallenge = false;
-    const runTab = async (tabId: number): Promise<ZreadResponse | null> => {
-      try {
-        const r = await zreadFetchInTab(tabId, url, { ...init, headers: pageHeaders });
+    const note = (r: ZreadResponse | null): ZreadResponse | null => {
+      if (r) {
         last = r;
         if (pageResultIsChallenge(r)) sawChallenge = true;
-        return pageResultUsable(r) ? r : null;
+      }
+      return r && pageResultUsable(r) ? r : null;
+    };
+
+    const tabId = await ensureProxyWindow();
+    if (tabId == null) return { ok: null, last, sawChallenge };
+
+    const run = async (): Promise<ZreadResponse | null> => {
+      try {
+        return await zreadFetchInProxyPage(tabId, url, { ...init, headers: pageHeaders });
       } catch (e) {
-        console.log('[zread-ext] page fetch in tab', tabId, 'threw:', String(e));
+        console.log('[zread-ext] proxy fetch in offscreen page threw:', String(e));
         return null;
       }
     };
 
-    for (const tab of candidates.slice(0, 3)) {
-      const ok = await runTab(tab.id!);
-      if (ok) {
-        console.log('[zread-ext] page proxy OK via tab', tab.id, url);
-        return { ok, last, sawChallenge };
-      }
+    const ok = note(await run());
+    if (ok) {
+      console.log('[zread-ext] proxy OK via offscreen page', url);
+      return { ok, last, sawChallenge };
     }
-
-    // 瞬时 504/502（非真人机挑战）时，在最健康的标签上延迟重试一次
-    const lastResp = last as ZreadResponse | null;
-    if (lastResp && lastResp.status !== 0 && !sawChallenge && candidates.length > 0) {
-      console.log('[zread-ext] transient failure (status', lastResp.status + '), retrying healthiest tab after delay');
+    // 瞬时 504/502（非真人机挑战）延迟重试一次
+    const lastOnce = last as ZreadResponse | null;
+    if (lastOnce && lastOnce.status !== 0 && !sawChallenge) {
       await new Promise((r) => setTimeout(r, 1200));
-      const ok = await runTab(candidates[0].id!);
-      if (ok) {
-        console.log('[zread-ext] page proxy OK via delayed retry, tab', candidates[0].id, url);
-        return { ok, last, sawChallenge };
+      const retry = note(await run());
+      if (retry) {
+        console.log('[zread-ext] proxy OK via delayed retry (offscreen page)', url);
+        return { ok: retry, last, sawChallenge };
       }
     }
-    return { ok: null, last: lastResp, sawChallenge };
+    return { ok: null, last, sawChallenge };
   };
 
-  let result = await attemptPageProxy();
+  let result = await attemptProxy();
 
-  // 网络层异常（status 0，如标签在请求期间导航/框架被移除）时，整体重跑一次
+  // 网络层异常（status 0，如页面导航）时，整体重跑一次
   if (!result.ok && result.last?.status === 0 && !result.sawChallenge) {
-    console.log('[zread-ext] network-level failure (status 0), re-running page proxy once');
+    console.log('[zread-ext] network-level failure (status 0), re-running proxy once');
     await new Promise((r) => setTimeout(r, 800));
-    result = await attemptPageProxy();
+    result = await attemptProxy();
   }
 
-  // —— 3) 全部候选都不行：真人机挑战才提示用户；否则报普通错误 ——
+  // —— 3) 都不行：真人机挑战才提示用户；否则报普通错误 ——
   if (result.ok) return result.ok;
   if (result.sawChallenge || (result.last && pageResultIsChallenge(result.last))) {
-    console.log('[zread-ext] page proxy hit a real Cloudflare challenge');
+    console.log('[zread-ext] proxy hit a real Cloudflare challenge');
     throw new CfChallengeError();
   }
-  throw new Error(`page proxy failed (last status ${result.last?.status})`);
+  throw new Error(`proxy failed (last status ${result.last?.status})`);
 }
 
 // 构造业务请求头（token + locale）；Cookie 由浏览器自动携带
