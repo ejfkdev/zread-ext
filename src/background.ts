@@ -5,7 +5,7 @@
 import { detectLocale } from './github/i18n';
 
 // 版本标记：每次发布改这里，控制台可确认扩展是否真的重载了新代码
-const EXT_VERSION = '2.32.6';
+const EXT_VERSION = '2.32.7';
 console.log('[zread-ext] background service worker started, version', EXT_VERSION);
 
 // 缓存键带语言前缀，避免中英文缓存互串
@@ -189,7 +189,16 @@ async function ensureHiddenZreadTab(): Promise<chrome.tabs.Tab | null> {
   if (!hiddenTabCreating) {
     hiddenTabCreating = (async () => {
       const tab = await chrome.tabs.create({ url: 'https://zread.ai/', active: false });
-      if (tab.id != null) await sessionSet(HIDDEN_TAB_KEY, tab.id);
+      if (tab.id != null) {
+        await sessionSet(HIDDEN_TAB_KEY, tab.id);
+        // 收进折叠的标签组，避免这个后台工作标签在标签栏里看起来像"扩展又开了个网页"
+        try {
+          const gid = await chrome.tabs.group({ tabIds: [tab.id] });
+          await chrome.tabGroups.update(gid, { collapsed: true, title: 'Zread 文档代理' });
+        } catch {
+          /* 不支持分组时保持普通后台标签 */
+        }
+      }
       return tab;
     })();
     void hiddenTabCreating
@@ -207,6 +216,36 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     if (tabId === (await sessionGet<number>(HIDDEN_TAB_KEY))) await sessionRemove(HIDDEN_TAB_KEY);
   })();
 });
+
+// 启动时把已存在但尚未分组的代理标签收进折叠组：
+//  - session 里已有 id（SW 重启）：直接补组；
+//  - 扩展重载会清空 session：认领"非激活、地址恰为 zread.ai 根、未分组"的遗留标签。
+void (async () => {
+  const collapse = async (tabId: number) => {
+    try {
+      const gid = await chrome.tabs.group({ tabIds: [tabId] });
+      await chrome.tabGroups.update(gid, { collapsed: true, title: 'Zread 文档代理' });
+    } catch {
+      /* 不支持分组时保持普通后台标签 */
+    }
+  };
+  const saved = await sessionGet<number>(HIDDEN_TAB_KEY);
+  if (saved != null) {
+    try {
+      const tab = await chrome.tabs.get(saved);
+      if ((tab.groupId ?? -1) === -1) await collapse(saved);
+      return;
+    } catch {
+      await sessionRemove(HIDDEN_TAB_KEY);
+    }
+  }
+  const tabs = await chrome.tabs.query({ url: 'https://zread.ai/' });
+  const orphan = tabs.find((t) => !t.active && (t.groupId ?? -1) === -1 && t.id != null);
+  if (orphan?.id != null) {
+    await sessionSet(HIDDEN_TAB_KEY, orphan.id);
+    await collapse(orphan.id);
+  }
+})();
 
 // 在指定标签里发起同站 fetch（浏览器自动带全部 cookie）
 async function zreadFetchInTab(
