@@ -2,8 +2,8 @@
   "$schema": "https://json.schemastore.org/chrome-manifest.json",
   "manifest_version": 3,
   "version": "0.1.0",
-  "name": "Zread Docs for GitHub",
-  "description": "View Zread.ai documentation for any GitHub repository right on the repo page: sidebar TOC, in-page docs and diagrams.",
+  "name": "__MSG_appName__",
+  "description": "__MSG_appDesc__",
   "icons": {
     "16": "images/icon-16.png",
     "32": "images/icon-32.png",
@@ -45,5 +45,6 @@
         ]
       }
     }
-  }
+  },
+  "default_locale": "en"
 }

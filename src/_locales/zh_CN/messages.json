@@ -1,0 +1,8 @@
+{
+  "appName": {
+    "message": "Zread Docs for GitHub"
+  },
+  "appDesc": {
+    "message": "在 GitHub 仓库页直接查看 zread.ai 文档：侧栏目录、页内阅读、图表渲染与章节导航。"
+  }
+}

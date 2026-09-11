@@ -1,0 +1,8 @@
+{
+  "appName": {
+    "message": "Zread Docs for GitHub"
+  },
+  "appDesc": {
+    "message": "View Zread.ai documentation for any GitHub repository right on the repo page: sidebar TOC, in-page docs and diagrams."
+  }
+}
