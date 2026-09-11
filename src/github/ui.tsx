@@ -525,8 +525,15 @@ async function loadDoc(slug: string) {
     // 净化
     const safeHtml = DOMPurify.sanitize(fixedHtml, { ADD_ATTR: ['target'] })
 
-    // 直接将文档 HTML 放入 markdown-body 容器（复用 GitHub 自带的 markdown 样式）
-    container.innerHTML = safeHtml
+    // 直接将文档 HTML 放入 markdown-body 容器（复用 GitHub 自带的 markdown 样式）。
+    // 个别页面（如 torvalds/linux）GitHub 不再渲染 article.markdown-body，注入容器
+    // 没有 markdown 样式作用域（表格/代码块会变成无样式裸元素）——此时自己包一层
+    // markdown-body，保证表格、代码块、标题等始终带 GitHub 排版。
+    const needsMarkdownWrap =
+      !container.classList.contains('markdown-body') && !container.closest('.markdown-body')
+    container.innerHTML = needsMarkdownWrap
+      ? `<article class="markdown-body entry-content">${safeHtml}</article>`
+      : safeHtml
 
     // 渲染 mermaid 图表（在加复制按钮前，避免给图表块加按钮）
     await renderMermaidBlocks(container)
