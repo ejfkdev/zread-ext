@@ -47,6 +47,9 @@ English (Chinese localization included; UI and fetched content follow browser la
 
 ## Graphics & Assets
 
+<!-- Store assets live in release/store-assets, which is git-ignored: they are local
+     publishing artifacts, not part of the public repository. -->
+
 | Asset | Dimensions | Status | Filename |
 |-------|-----------|--------|----------|
 | Store Icon [REQUIRED] | 128×128 PNG | ✅ Ready | release/store-assets/icon-128.png |

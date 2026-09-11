@@ -1,7 +1,7 @@
 {
   "private": true,
   "name": "zread-github-ext",
-  "description": "在 GitHub 仓库页面直接查看 zread.ai 文档，左侧目录切换内容，复用 README 区域显示。",
+  "description": "View Zread.ai documentation for any GitHub repository right on the repo page. 在 GitHub 仓库页直接查看 zread.ai 文档。",
   "version": "0.1.0",
   "license": "MIT",
   "type": "module",
@@ -34,5 +34,14 @@
     "esbuild": "^0.28.2",
     "extension": "^4.1.10",
     "typescript": "^5.9.3"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ejfkdev/zread-ext.git"
+  },
+  "homepage": "https://github.com/ejfkdev/zread-ext#readme",
+  "bugs": {
+    "url": "https://github.com/ejfkdev/zread-ext/issues"
+  },
+  "author": "ejfkdev"
 }
