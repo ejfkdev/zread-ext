@@ -3,7 +3,7 @@
   "manifest_version": 3,
   "version": "0.1.0",
   "name": "Zread Docs for GitHub",
-  "description": "View Zread.ai documentation for any GitHub repository right on the repo page: sidebar table of contents, in-page doc rendering, diagrams and section navigation. 在 GitHub 仓库页直接查看 zread.ai 文档。",
+  "description": "View Zread.ai documentation for any GitHub repository right on the repo page: sidebar TOC, in-page docs and diagrams.",
   "icons": {
     "16": "images/icon-16.png",
     "32": "images/icon-32.png",
