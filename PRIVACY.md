@@ -62,7 +62,7 @@ Store listing.
 
 ## Contact
 
-Privacy questions: Ejfkdev@gmail.com
+Privacy questions: please open an issue at https://github.com/ejfkdev/zread-ext/issues
 Source & issues: https://github.com/ejfkdev/zread-ext
 
 ---
@@ -77,4 +77,4 @@ Source & issues: https://github.com/ejfkdev/zread-ext
 - 不收集任何个人身份信息、位置、浏览历史、健康或金融信息，不含任何统计/遥测。
 - 文档内容缓存在本机（chrome.storage.local，约 50MB 上限），卸载扩展即全部删除。
 - 除 zread.ai 外不与任何第三方共享数据，也不出售数据。
-- 隐私咨询：Ejfkdev@gmail.com
+- 隐私咨询：请在 https://github.com/ejfkdev/zread-ext/issues 提交 issue

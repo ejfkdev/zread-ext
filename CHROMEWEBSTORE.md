@@ -116,7 +116,8 @@ https://github.com/ejfkdev/zread-ext/blob/main/PRIVACY.md
 ejfkdev
 
 **Contact Email** [REQUIRED]
-Ejfkdev@gmail.com
+<!-- 提交时在 Chrome Developer Console 里手动填写；按用户要求不写入仓库文档。 -->
+(fill in the Developer Console at submission time — intentionally not stored in this repository)
 
 **Support URL / Email** [RECOMMENDED]
 https://github.com/ejfkdev/zread-ext/issues
