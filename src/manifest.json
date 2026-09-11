@@ -1,9 +1,9 @@
 {
   "$schema": "https://json.schemastore.org/chrome-manifest.json",
   "manifest_version": 3,
-  "version": "2.32.8",
+  "version": "0.1.0",
   "name": "Zread Docs for GitHub",
-  "description": "在 GitHub 仓库页面直接查看 zread.ai 文档，左侧目录切换内容，复用 README 区域显示。",
+  "description": "View Zread.ai documentation for any GitHub repository right on the repo page: sidebar table of contents, in-page doc rendering, diagrams and section navigation. 在 GitHub 仓库页直接查看 zread.ai 文档。",
   "icons": {
     "16": "images/icon-16.png",
     "32": "images/icon-32.png",
