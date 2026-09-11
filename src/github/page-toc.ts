@@ -77,12 +77,48 @@ function onScroll() {
   })
 }
 
+let railAnchor: HTMLElement | null = null
+let anchorRetryTimer: number | null = null
+
+// 锚点容器：优先用 buildPageToc 时记录的容器；README 未挂载时（GitHub 对超大
+// README 可能不渲染 article.markdown-body，或 SPA 重挂载瞬间）回退到承载我们
+// UI 的卡片；都找不到则返回 null（调用方隐藏轨道，绝不带错误位置显示）。
+function findAnchor(): HTMLElement | null {
+  if (railAnchor && railAnchor.isConnected) return railAnchor
+  const readme = document.querySelector('article.markdown-body')
+  const box =
+    (readme?.closest('[class*="OverviewRepoFiles-module__Box_1__"]') ||
+      readme?.closest('[class*="Box"]') ||
+      readme ||
+      document.querySelector('.zread-toggle-btn')?.closest('[class*="Box"]')) as HTMLElement | null
+  if (box) railAnchor = box
+  return box
+}
+
 function positionRail() {
   if (!railEl || !cardEl) return
-  const readme = document.querySelector('article.markdown-body')
-  const box = (readme?.closest('[class*="OverviewRepoFiles-module__Box_1__"]') ||
-    readme?.closest('[class*="Box"]') || readme) as HTMLElement | null
-  if (!box) return
+  const box = findAnchor()
+  if (!box) {
+    // 容器尚未挂载：先隐藏，稍后重试（README 懒挂载/SPA 重挂载后恢复）
+    railEl.classList.add('zread-toc-hidden')
+    hideCard()
+    if (anchorRetryTimer == null) {
+      anchorRetryTimer = window.setInterval(() => {
+        if (!railEl) {
+          if (anchorRetryTimer != null) { window.clearInterval(anchorRetryTimer); anchorRetryTimer = null }
+          return
+        }
+        if (findAnchor()) {
+          window.clearInterval(anchorRetryTimer!)
+          anchorRetryTimer = null
+          railEl.classList.remove('zread-toc-hidden')
+          positionRail()
+        }
+      }, 800)
+    }
+    return
+  }
+  if (anchorRetryTimer != null) { window.clearInterval(anchorRetryTimer); anchorRetryTimer = null }
   const r = box.getBoundingClientRect()
   // 水平位置：README 卡片与右栏（Packages/About 列）之间的缝隙居中；
   // 缝隙不可用（右栏换行到下方或视口太窄）时退回卡片右缘内侧
@@ -140,6 +176,7 @@ export function buildPageToc(container: HTMLElement) {
   removePageToc()
   items = collectItems(container)
   if (items.length === 0) return
+  railAnchor = (container.closest('[class*="Box"]') as HTMLElement | null) || container
 
   railEl = document.createElement('div')
   railEl.className = 'zread-toc-rail'
@@ -198,10 +235,12 @@ export function buildPageToc(container: HTMLElement) {
 export function removePageToc() {
   removeListeners?.()
   removeListeners = null
+  if (anchorRetryTimer != null) { window.clearInterval(anchorRetryTimer); anchorRetryTimer = null }
   railEl?.remove()
   cardEl?.remove()
   railEl = null
   cardEl = null
+  railAnchor = null
   items = []
   activeIdx = -1
   if (hideTimer) { window.clearTimeout(hideTimer); hideTimer = null }

@@ -129,6 +129,7 @@ https://zread.ai
 
 | Version | Date | Changes | Status |
 |---------|------|---------|--------|
+| 0.1.1 | 2026-09-12 | Fix in-page section rail misplacement on repos whose README is not mounted (anchor fallback + hide-and-retry) |
 | 0.1.0 | 2026-09-12 | First public release: documentation sidebar + in-page doc rendering, mermaid diagrams with fullscreen viewer, in-page section progress rail, local cache, one-click indexing submit/refresh | Draft (item ID cjmlghhnknebnclkipbanfppgadcepaj; listing + privacy forms filled 2026-09-12; listing localized: en default + zh-CN; awaiting store icon + screenshots upload, then submit) |
 
 ## Review Notes
