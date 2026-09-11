@@ -342,8 +342,41 @@ function injectStyles() {
 // ==========================================
 // 工具函数
 // ==========================================
+// 移除 zread 文档顶部的 YAML front-matter。线上格式不统一：除标准 `---\n…\n---\n` 外，
+// 还存在 CRLF 行尾、分隔线带尾随空格、带 BOM、以及无围栏（元数据行直接置顶，其下的
+// `---` 被 marked 当作 setext 标题下划线，渲染出 "slug:1-overview blog_type:normal"
+// 这样的伪标题）等变体，统一在此兼容。
+const FM_FENCE = '[ \t]*(?:---+|\\.\\.\\.)[ \t]*'
+const FM_META_LINES = '(?:[a-z_][\\w-]*:[^\\n]*\\r?\\n)+'
 function stripFrontMatter(markdown: string): string {
-  return markdown.replace(/^---\n[\s\S]*?\n---\n*/, '').trim()
+  let md = markdown.replace(/^\uFEFF/, '')
+  // 围栏式：--- … ---（或 ...），兼容 CRLF 与分隔线尾随空格
+  md = md.replace(new RegExp('^' + FM_FENCE + '\\r?\\n[\\s\\S]*?\\r?\\n' + FM_FENCE + '(?:\\r?\\n)?'), '')
+  // 无围栏式：顶部连续 key:value 元数据行 + 紧随的 setext 下划线
+  md = md.replace(new RegExp('^' + FM_META_LINES + FM_FENCE + '(?:\\r?\\n)?'), '')
+  return md.trim()
+}
+
+// 渲染后的兜底清理：front-matter 漏网时，删除容器开头的伪元数据标题
+// （如 <h2>slug:1-overview blog_type:normal</h2>）及其前面的 <hr>。
+const META_HEADING_RE = /^[a-z_][\w-]*:\S+(\s+[a-z_][\w-]*:\S+)*$/i
+function scrubFrontMatterArtifacts(container: HTMLElement) {
+  for (let i = 0; i < 2; i++) {
+    const first = container.firstElementChild as HTMLElement | null
+    if (!first) return
+    const isMetaHeading = /^H[1-6]$/.test(first.tagName) && META_HEADING_RE.test(first.textContent?.trim() || '')
+    if (isMetaHeading) {
+      first.remove()
+      continue
+    }
+    const next = first.nextElementSibling as HTMLElement | null
+    if (first.tagName === 'HR' && next && /^H[1-6]$/.test(next.tagName) && META_HEADING_RE.test(next.textContent?.trim() || '')) {
+      first.remove()
+      next.remove()
+      continue
+    }
+    return
+  }
 }
 
 function fixRelativeLinks(html: string, baseUrl: string): string {
@@ -534,6 +567,10 @@ async function loadDoc(slug: string) {
     container.innerHTML = needsMarkdownWrap
       ? `<article class="markdown-body entry-content">${safeHtml}</article>`
       : safeHtml
+    // 兜底：front-matter 若有漏网变体，删掉渲染出来的伪元数据标题
+    scrubFrontMatterArtifacts(
+      (container.querySelector(':scope > article.markdown-body') ?? container) as HTMLElement
+    )
 
     // 渲染 mermaid 图表（在加复制按钮前，避免给图表块加按钮）
     await renderMermaidBlocks(container)

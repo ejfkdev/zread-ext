@@ -129,6 +129,7 @@ https://zread.ai
 
 | Version | Date | Changes | Status |
 |---------|------|---------|--------|
+| 0.1.3 | 2026-09-12 | Hide zread front-matter metadata (e.g. "slug:1-overview blog_type:normal") that leaked into the rendered doc as a fake heading; handles CRLF/BOM/unfenced variants + DOM-level backstop |
 | 0.1.2 | 2026-09-12 | Docs render with GitHub markdown styling on pages whose README container lacks the markdown-body scope (wrap injected doc) |
 | 0.1.1 | 2026-09-12 | Fix in-page section rail misplacement on repos whose README is not mounted (anchor fallback + hide-and-retry) |
 | 0.1.0 | 2026-09-12 | First public release: documentation sidebar + in-page doc rendering, mermaid diagrams with fullscreen viewer, in-page section progress rail, local cache, one-click indexing submit/refresh | Draft (item ID cjmlghhnknebnclkipbanfppgadcepaj; listing + privacy forms filled 2026-09-12; listing localized: en default + zh-CN; awaiting store icon + screenshots upload, then submit) |
