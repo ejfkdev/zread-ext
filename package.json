@@ -6,6 +6,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
+    "version:sync": "node scripts/sync-version.mjs",
     "dev": "extension dev",
     "start": "extension start",
     "build": "extension build && npm run build:mermaid && npm run build:proxy",

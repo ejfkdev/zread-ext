@@ -1,0 +1,90 @@
+name: release
+
+# 打 tag（v0.1.5 或 0.1.5）即触发：校验 tag 与仓库版本一致 → 构建 →
+# 产出 store zip + CRX（需 secret CRX_PRIVATE_KEY）→ 建 GitHub Release 上传产物。
+on:
+  push:
+    tags:
+      - 'v*'
+      - '*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 需要历史 tag 生成 changelog
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Check tag matches repo version
+        id: ver
+        run: |
+          TAG_VERSION="${TAG#v}"
+          if ! printf '%s' "$TAG_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$'; then
+            echo "::error::tag '$TAG' is not semver (expected like v0.1.5)"; exit 1
+          fi
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::tag version $TAG_VERSION != package.json version $PKG_VERSION. Bump the version (npm run version:sync $TAG_VERSION), commit and re-tag."
+            exit 1
+          fi
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (chromium)
+        run: npm run build
+
+      - name: Package store zip
+        run: |
+          VER="${{ steps.ver.outputs.version }}"
+          cd dist/chromium
+          zip -r "../../zread-github-ext-${VER}.zip" . -x '_metadata/*' -x '*.DS_Store'
+          cd ../..
+          unzip -l "zread-github-ext-${VER}.zip" | head -20
+
+      - name: Pack CRX
+        if: ${{ secrets.CRX_PRIVATE_KEY != '' }}
+        run: |
+          VER="${{ steps.ver.outputs.version }}"
+          printf '%s\n' "${{ secrets.CRX_PRIVATE_KEY }}" > /tmp/crx-key.pem
+          google-chrome --headless=new --disable-gpu --no-sandbox \
+            --pack-extension="$PWD/dist/chromium" \
+            --pack-extension-key=/tmp/crx-key.pem
+          mv dist/chromium.crx "zread-github-ext-${VER}.crx"
+          rm -f /tmp/crx-key.pem
+          ls -la "zread-github-ext-${VER}.crx"
+
+      - name: Warn when CRX key missing
+        if: ${{ secrets.CRX_PRIVATE_KEY == '' }}
+        run: echo "::warning::secret CRX_PRIVATE_KEY not set — skipping CRX packaging (zip only). See RELEASE.md."
+
+      - name: Checksums
+        run: |
+          VER="${{ steps.ver.outputs.version }}"
+          sha256sum "zread-github-ext-${VER}.zip" "zread-github-ext-${VER}.crx" 2>/dev/null > SHA256SUMS.txt || \
+          sha256sum "zread-github-ext-${VER}.zip" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        run: |
+          VER="${{ steps.ver.outputs.version }}"
+          FILES="zread-github-ext-${VER}.zip"
+          [ -f "zread-github-ext-${VER}.crx" ] && FILES="$FILES zread-github-ext-${VER}.crx"
+          FILES="$FILES SHA256SUMS.txt"
+          gh release create "$TAG" $FILES \
+            --title "v${VER}" \
+            --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
