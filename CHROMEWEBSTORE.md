@@ -73,6 +73,7 @@ rail on the right. Capture at 1280×800 exactly (CWS rejects other sizes).
 | storage | permissions | Caches fetched documentation (table of contents and pages) on the device so documents open instantly and survive reloads. |
 | unlimitedStorage | permissions | The documentation cache can exceed the default 5 MB storage quota (capped at ~50 MB with automatic least-recently-used eviction). |
 | alarms | permissions | Schedules background pre-caching of a repository's documents so pre-fetching survives browser idle periods without keeping a page open. |
+| declarativeNetRequest | permissions | Rewrites the Origin/Referer headers on the extension's own requests to zread.ai so the documentation service accepts them (the browser otherwise attaches the extension's internal origin, which the service rejects with 403). One header-modification rule scoped to zread.ai only; no blocking or redirect rules. |
 | *://*.github.com/* | host_permissions | Required to show the documentation sidebar and render documents inside GitHub repository pages. |
 | *://zread.ai/* | host_permissions | Required to fetch documentation content, indexing status and refreshes from the Zread documentation service. |
 
@@ -129,6 +130,7 @@ https://zread.ai
 
 | Version | Date | Changes | Status |
 |---------|------|---------|--------|
+| 0.1.4 | 2026-09-12 | Repo refresh no longer fails with 403: header-rewrite rule restores a zread.ai Origin/Referer on extension requests (was lost in the rewrite); 2xx responses without a body (e.g. 204) now count as success |
 | 0.1.3 | 2026-09-12 | Hide zread front-matter metadata (e.g. "slug:1-overview blog_type:normal") that leaked into the rendered doc as a fake heading; handles CRLF/BOM/unfenced variants + DOM-level backstop |
 | 0.1.2 | 2026-09-12 | Docs render with GitHub markdown styling on pages whose README container lacks the markdown-body scope (wrap injected doc) |
 | 0.1.1 | 2026-09-12 | Fix in-page section rail misplacement on repos whose README is not mounted (anchor fallback + hide-and-retry) |

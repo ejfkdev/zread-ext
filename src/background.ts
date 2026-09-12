@@ -5,7 +5,7 @@
 import { detectLocale } from './github/i18n';
 
 // 版本标记：每次发布改这里，控制台可确认扩展是否真的重载了新代码
-const EXT_VERSION = '0.1.3';
+const EXT_VERSION = '0.1.4';
 console.log('[zread-ext] background service worker started, version', EXT_VERSION);
 
 // 缓存键带语言前缀，避免中英文缓存互串
@@ -288,9 +288,9 @@ async function zreadFetchInProxyPage(
   return r;
 }
 
-// 代理响应是否"可用"：200 且正文不是挑战页、来源页不是错误页
+// 代理响应是否"可用"：2xx 且正文不是挑战页、来源页不是错误页
 function pageResultUsable(r: ZreadResponse): boolean {
-  if (r.status !== 200) return false;
+  if (r.status < 200 || r.status >= 300) return false;
   if (isCfChallengeText(r.text)) return false;
   if (isChallengeTitle(r.pageTitle || '')) return false;
   const title = (r.pageTitle || '').toLowerCase();
@@ -336,10 +336,11 @@ async function directFetch(
   }
 }
 
-// 直连响应是否"真正可用"：200、非挑战页；
-// HTML 整页必须带 Next flight 数据（否则视为空/拦截页）；API/JSON 与 RSC 只要求 200。
+// 直连响应是否"真正可用"：2xx、非挑战页；
+// HTML 整页必须带 Next flight 数据（否则视为空/拦截页）；API/JSON 与 RSC 只要求 2xx。
+// 注意：写操作（如 refresh）成功时可能返回 204 等无body状态，不能只认 200。
 function directUsable(r: ZreadResponse, url: string, isRsc = false): boolean {
-  if (r.status !== 200) return false;
+  if (r.status < 200 || r.status >= 300) return false;
   if (isCfChallengeText(r.text)) return false;
   const isHtmlPage = !/\/api\//.test(url);
   if (isHtmlPage && !isRsc && !r.text.includes('__next_f')) return false;
