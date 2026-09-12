@@ -5,12 +5,20 @@
 import { detectLocale } from './github/i18n';
 
 // 版本标记：每次发布改这里，控制台可确认扩展是否真的重载了新代码
-const EXT_VERSION = '0.1.4';
+const EXT_VERSION = '0.1.5';
 console.log('[zread-ext] background service worker started, version', EXT_VERSION);
 
 // 缓存键带语言前缀，避免中英文缓存互串
-function contentLocale(): string {
+// 语言判定：页面上下文（content script）的 navigator.language 能读到用户的"首选网页语言"，
+// 而 service worker 里它只是浏览器界面语言，切换网页语言时不会变。因此 locale 由 content
+// script 随每条消息上报（message.locale），后台据此分区缓存与设置 X-Locale；无消息上下文
+// （revalidate / prefetch 恢复）时沿用最近一次上报值。切换语言后缓存键随之改变，不会命中旧语言缓存。
+function detectContentLocale(): string {
   return detectLocale() === 'zh' ? 'zh' : 'en';
+}
+let sessionLocale = detectContentLocale();
+function contentLocale(): string {
+  return sessionLocale;
 }
 // 缓存键版本：解析逻辑变更时升级，强制旧/脏缓存失效
 const CACHE_KEY_V = 'v2';
@@ -82,7 +90,7 @@ async function getZreadAuth(): Promise<{ token: string | null; locale: string; c
     if (c.name === 'CGX_AUTH_TOKEN') token = c.value;
   }
   // 仅识别到中文才用 zh，否则 en
-  const locale = detectLocale() === 'zh' ? 'zh' : 'en';
+  const locale = contentLocale();
   return { token, locale, cookieHeader };
 }
 
@@ -1284,6 +1292,9 @@ function errPayload(err: unknown): { error: string } {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('[zread-ext] background received message:', message?.type);
   if (!message || !message.type) return false;
+
+  // content script 上报当前页面语言环境（见 contentLocale 注释），必须在任何缓存键计算之前采纳
+  if (typeof message.locale === 'string') sessionLocale = message.locale === 'zh' ? 'zh' : 'en';
 
   if (message.type === 'zreadReadOutline') {
     (async () => {

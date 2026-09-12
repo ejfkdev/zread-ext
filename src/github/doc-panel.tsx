@@ -1,7 +1,7 @@
 // doc-panel.tsx — 文档目录树 React 组件（带搜索框 + 可折叠 section/group）
 
 import { useState, useEffect, useMemo } from 'react'
-import { t, tEta } from './i18n'
+import { t, tEta, detectLocale } from './i18n'
 
 export interface DocOutlineItem {
   title: string
@@ -130,7 +130,7 @@ export default function DocPanel({ repo, onDocClick }: DocPanelProps) {
       try {
         const response = await new Promise<any>((resolve, reject) => {
           chrome.runtime.sendMessage(
-            { type: 'zreadReadOutline', repo },
+            { type: 'zreadReadOutline', repo, locale: detectLocale() },
             (res) => {
               // lastError 必须在回调内读取：回调外可能读到上一次调用的残留值
               if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message))
@@ -145,7 +145,7 @@ export default function DocPanel({ repo, onDocClick }: DocPanelProps) {
         if (response?.notIndexed) {
           setIndexing(true)
           if (response?.eta) setEta(response.eta)
-          chrome.runtime.sendMessage({ type: 'zreadSubmit', repo, mode: 'index' }, () => {})
+          chrome.runtime.sendMessage({ type: 'zreadSubmit', repo, mode: 'index', locale: detectLocale() }, () => {})
           setOutline([])
           return
         }
@@ -160,7 +160,7 @@ export default function DocPanel({ repo, onDocClick }: DocPanelProps) {
 
         // 收录超过 7 天：静默提交刷新
         if (response?.stale) {
-          chrome.runtime.sendMessage({ type: 'zreadSubmit', repo, mode: 'refresh' }, () => {})
+          chrome.runtime.sendMessage({ type: 'zreadSubmit', repo, mode: 'refresh', locale: detectLocale() }, () => {})
         }
 
         if (response?.outline) {
@@ -169,7 +169,7 @@ export default function DocPanel({ repo, onDocClick }: DocPanelProps) {
           const slugs = [...response.outline]
             .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0))
             .map((p: any) => p.slug)
-          if (slugs.length) chrome.runtime.sendMessage({ type: 'zreadPrefetch', repo, slugs }, () => {})
+          if (slugs.length) chrome.runtime.sendMessage({ type: 'zreadPrefetch', repo, slugs, locale: detectLocale() }, () => {})
         }
       } catch (err) {
         if (err instanceof Error && err.message === 'CF_CHALLENGE') {

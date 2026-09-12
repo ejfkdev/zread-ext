@@ -7,7 +7,7 @@ import type { RepoInfo } from './integrator'
 import { findReadmeBox, findReadmeContainer, isGitHubRepoPage } from './integrator'
 import DocPanel from './doc-panel'
 import { buildPageToc, removePageToc } from './page-toc'
-import { t } from './i18n'
+import { t, detectLocale } from './i18n'
 
 let docPanelRoot: Root | null = null
 let docPanelContainer: HTMLElement | null = null
@@ -537,7 +537,7 @@ async function loadDoc(slug: string) {
   try {
     const response = await new Promise<{ page?: { markdown?: string }; error?: string }>((resolve, reject) => {
       chrome.runtime.sendMessage(
-        { type: 'zreadReadPage', repo: `${currentRepo!.owner}/${currentRepo!.repo}`, slug },
+        { type: 'zreadReadPage', repo: `${currentRepo!.owner}/${currentRepo!.repo}`, slug, locale: detectLocale() },
         (res) => {
           // lastError 必须在回调内读取：回调外可能读到上一次调用的残留值
           if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message))

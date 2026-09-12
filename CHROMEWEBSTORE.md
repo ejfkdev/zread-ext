@@ -130,6 +130,7 @@ https://zread.ai
 
 | Version | Date | Changes | Status |
 |---------|------|---------|--------|
+| 0.1.5 | 2026-09-12 | Language switch no longer shows stale cached docs: content locale is reported by the page (web-language aware) instead of the worker's UI language, so cache keys and X-Locale follow the browser's current language |
 | 0.1.4 | 2026-09-12 | Repo refresh no longer fails with 403: header-rewrite rule restores a zread.ai Origin/Referer on extension requests (was lost in the rewrite); 2xx responses without a body (e.g. 204) now count as success |
 | 0.1.3 | 2026-09-12 | Hide zread front-matter metadata (e.g. "slug:1-overview blog_type:normal") that leaked into the rendered doc as a fake heading; handles CRLF/BOM/unfenced variants + DOM-level backstop |
 | 0.1.2 | 2026-09-12 | Docs render with GitHub markdown styling on pages whose README container lacks the markdown-body scope (wrap injected doc) |

@@ -2,7 +2,7 @@
   "private": true,
   "name": "zread-github-ext",
   "description": "View Zread.ai documentation for any GitHub repository right on the repo page. 在 GitHub 仓库页直接查看 zread.ai 文档。",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "license": "MIT",
   "type": "module",
   "scripts": {
