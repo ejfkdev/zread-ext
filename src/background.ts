@@ -5,7 +5,7 @@
 import { detectLocale } from './github/i18n';
 
 // 版本标记：每次发布改这里，控制台可确认扩展是否真的重载了新代码
-const EXT_VERSION = '0.1.5';
+const EXT_VERSION = '0.1.6';
 console.log('[zread-ext] background service worker started, version', EXT_VERSION);
 
 // 缓存键带语言前缀，避免中英文缓存互串
@@ -21,7 +21,7 @@ function contentLocale(): string {
   return sessionLocale;
 }
 // 缓存键版本：解析逻辑变更时升级，强制旧/脏缓存失效
-const CACHE_KEY_V = 'v2';
+const CACHE_KEY_V = 'v3';
 // 独立 mermaid 渲染器文件（按需注入，不进主 content script）
 const MERMAID_RENDERER_FILE = 'mermaid_renderer.js';
 function outlineKey(repo: string): string {
@@ -67,6 +67,12 @@ async function sessionRemove(key: string): Promise<void> {
 // 绝大多数情况下不再需要任何代理载体（屏幕外窗口仅作兜底）。
 // ==========================================
 async function getZreadAuth(): Promise<{ token: string | null; locale: string; cookieHeader: string }> {
+  const locale = contentLocale();
+  // zread 服务端本地化实际读 X-Locale **cookie**（官方客户端 header+cookie 一起发，见
+  // ejfkdev/zread `zread/__init__.py` L1516-1519）。只发请求头无效：浏览器里残留的旧
+  // X-Locale=zh cookie 会让服务端一直返回中文。故先按会话 locale 同步写 cookie，再读
+  // cookie 拼头——手拼 Cookie 头与屏幕外代理的同源请求就都带正确语言。
+  await ensureLocaleCookie(locale);
   let cookies: chrome.cookies.Cookie[] = [];
   try {
     cookies = await chrome.cookies.getAll({ url: 'https://zread.ai' });
@@ -90,8 +96,19 @@ async function getZreadAuth(): Promise<{ token: string | null; locale: string; c
     if (c.name === 'CGX_AUTH_TOKEN') token = c.value;
   }
   // 仅识别到中文才用 zh，否则 en
-  const locale = contentLocale();
   return { token, locale, cookieHeader };
+}
+
+// 把 zread.ai 的 X-Locale cookie 同步为当前会话 locale（值相同则不写）
+async function ensureLocaleCookie(locale: string): Promise<void> {
+  try {
+    const cur = await chrome.cookies.get({ url: 'https://zread.ai', name: 'X-Locale' });
+    if (cur?.value === locale) return;
+    await chrome.cookies.set({ url: 'https://zread.ai', name: 'X-Locale', value: locale, path: '/', sameSite: 'lax' });
+    console.log('[zread-ext] X-Locale cookie synced to', locale);
+  } catch (e) {
+    console.log('[zread-ext] ensureLocaleCookie failed:', String(e));
+  }
 }
 
 // ==========================================
