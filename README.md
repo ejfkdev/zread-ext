@@ -3,11 +3,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Manifest V3](https://img.shields.io/badge/Manifest-V3-4c9a52)
 ![Chrome Extension](https://img.shields.io/badge/Chrome-Extension-f5c542)
-![Version](https://img.shields.io/badge/version-0.1.0-informational)
+![Version](https://img.shields.io/badge/version-0.1.6-informational)
 
 **中文** · [English](#english)
 
 在 GitHub 仓库页直接阅读 [zread.ai](https://zread.ai) 的 AI 文档：左侧生成文档目录，点击即在 README 区域阅读，无需切换标签。
+
+**安装**：[Chrome 应用商店 — Zread Docs for GitHub](https://chromewebstore.google.com/detail/zread-docs-for-github/cjmlghhnknebnclkipbanfppgadcepaj)（或按下文从源码构建加载）。
 
 ---
 
@@ -65,6 +67,8 @@ npm run build      # 构建到 dist/chromium
 # English
 
 Read [zread.ai](https://zread.ai) AI-generated documentation right on any GitHub repository page: a documentation sidebar appears beside the README, and clicking an entry renders the doc in the README area — no tab switching.
+
+**Install**: [Chrome Web Store — Zread Docs for GitHub](https://chromewebstore.google.com/detail/zread-docs-for-github/cjmlghhnknebnclkipbanfppgadcepaj) (or build & load from source below).
 
 ## ✨ Features
 
