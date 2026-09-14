@@ -130,6 +130,7 @@ https://zread.ai
 
 | Version | Date | Changes | Status |
 |---------|------|---------|--------|
+| 0.1.7 | 2026-09-13 | Off-screen fallback window no longer crashes with "Invalid value for bounds" on newer Chrome (bounds must be ≥50% on-screen): creation now falls back off-screen → minimized → default position |
 | 0.1.6 | 2026-09-12 | Docs language actually follows the browser language: zread localizes by the X-Locale cookie (not just the header), so a stale cookie kept forcing Chinese — the extension now syncs that cookie to the current language before every request; polluted cache purged via cache-key bump |
 | 0.1.5 | 2026-09-12 | Language switch no longer shows stale cached docs: content locale is reported by the page (web-language aware) instead of the worker's UI language, so cache keys and X-Locale follow the browser's current language |
 | 0.1.4 | 2026-09-12 | Repo refresh no longer fails with 403: header-rewrite rule restores a zread.ai Origin/Referer on extension requests (was lost in the rewrite); 2xx responses without a body (e.g. 204) now count as success |

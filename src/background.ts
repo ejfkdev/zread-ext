@@ -5,7 +5,7 @@
 import { detectLocale } from './github/i18n';
 
 // 版本标记：每次发布改这里，控制台可确认扩展是否真的重载了新代码
-const EXT_VERSION = '0.1.6';
+const EXT_VERSION = '0.1.7';
 console.log('[zread-ext] background service worker started, version', EXT_VERSION);
 
 // 缓存键带语言前缀，避免中英文缓存互串
@@ -237,16 +237,22 @@ async function ensureProxyWindow(): Promise<number | null> {
   let creating = proxyWindowCreating;
   if (!creating) {
     creating = (async (): Promise<chrome.windows.Window | null> => {
-      const win =
-        (await chrome.windows.create({
-          url: 'https://zread.ai/',
-          focused: false,
-          // 屏幕外：用户看不见；不能用 minimized（部分平台会延迟加载/冻结页面）
-          left: -32000,
-          top: -32000,
-          width: 800,
-          height: 600,
-        })) ?? null;
+      // 屏幕外：用户看不见。新版 Chrome 校验 create 的 bounds"至少 50% 在可见屏幕内"，
+      // -32000 会被拒（Invalid value for bounds），故逐级回退：屏幕外 → 最小化 → 默认位置。
+      const attempts: chrome.windows.CreateData[] = [
+        { url: 'https://zread.ai/', focused: false, left: -32000, top: -32000, width: 800, height: 600 },
+        { url: 'https://zread.ai/', focused: false, state: 'minimized', width: 800, height: 600 },
+        { url: 'https://zread.ai/', focused: false, width: 800, height: 600 },
+      ];
+      let win: chrome.windows.Window | null = null;
+      for (const data of attempts) {
+        try {
+          win = (await chrome.windows.create(data)) ?? null;
+          if (win) break;
+        } catch (e) {
+          console.log('[zread-ext] proxy window create attempt failed:', String(e));
+        }
+      }
       if (win && win.id != null) await sessionSet(PROXY_WINDOW_KEY, win.id);
       return win;
     })();
