@@ -10,7 +10,7 @@
    `EXT_VERSION`）：
 
    ```bash
-   npm run version:sync 0.1.5     # 接受 0.1.5 或 v0.1.5
+   bun run version:sync 0.1.5     # 接受 0.1.5 或 v0.1.5
    ```
 
 3. 提交并推送：`git commit -am "release: 0.1.5" && git push`

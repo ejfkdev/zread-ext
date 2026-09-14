@@ -5,6 +5,7 @@
   "version": "0.1.7",
   "license": "MIT",
   "type": "module",
+  "packageManager": "bun@1.4.2",
   "scripts": {
     "version:sync": "node scripts/sync-version.mjs",
     "dev": "extension dev",

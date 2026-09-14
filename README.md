@@ -29,12 +29,12 @@
 
 ## 🚀 开始
 
-**要求**：Node.js ≥ 22.12，Chrome（开发者模式）。
+**要求**：Bun ≥ 1.4（构建链经系统 Node ≥ 22.12 运行），Chrome（开发者模式）。
 
 ```bash
-npm install        # 安装依赖
-npm run dev        # 开发：自动打开带扩展的 Chrome
-npm run build      # 构建到 dist/chromium
+bun install      # 安装依赖（全局共享缓存 + APFS clone，不重复下载）
+bun run dev      # 开发：自动打开带扩展的 Chrome
+bun run build    # 构建到 dist/chromium
 ```
 
 **加载到 Chrome**
@@ -86,12 +86,12 @@ Read [zread.ai](https://zread.ai) AI-generated documentation right on any GitHub
 
 ## 🚀 Getting Started
 
-**Requirements**: Node.js ≥ 22.12, Chrome with Developer mode.
+**Requirements**: Bun ≥ 1.4 (the build chain runs via system Node ≥ 22.12), Chrome with Developer mode.
 
 ```bash
-npm install        # install dependencies
-npm run dev        # launches Chrome with the extension
-npm run build      # builds to dist/chromium
+bun install      # deps via shared global cache (APFS clones, no repeated downloads)
+bun run dev      # launches Chrome with the extension
+bun run build    # builds to dist/chromium
 ```
 
 **Load unpacked**
