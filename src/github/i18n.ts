@@ -30,6 +30,12 @@ const S = {
   },
   cfBtn: { en: 'Open zread.ai to verify ↗', zh: '打开 zread.ai 完成验证 ↗' },
   cfShort: { en: 'zread.ai triggered a Cloudflare human check.', zh: 'zread.ai 触发了 Cloudflare 人机验证。' },
+  verifyBarText: {
+    en: 'zread.ai needs a one-time Cloudflare human check. Open zread.ai once to pass it, then reload this page — documents load normally afterwards.',
+    zh: 'zread.ai 需要完成一次 Cloudflare 人机验证：点右侧按钮打开 zread.ai 通过验证后，刷新本页即可正常加载文档。',
+  },
+  verifyBarOpen: { en: 'Open zread.ai', zh: '打开 zread.ai' },
+  verifyBarDismiss: { en: 'Dismiss', zh: '关闭' },
   indexing: {
     en: 'This repo is being indexed. Docs will be available on zread.ai once done.',
     zh: '该仓库正在收录/索引中，完成后即可在 zread.ai 查看文档。',

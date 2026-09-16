@@ -68,8 +68,7 @@ rail on the right. Capture at 1280×800 exactly (CWS rejects other sizes).
 | Permission | Type | Justification |
 |------------|------|---------------|
 | cookies | permissions | Reads the user's zread.ai login cookie (only when logged in) so documentation requests to zread.ai are authenticated as the user; the cookie value is sent only to zread.ai. |
-| scripting | permissions | Inserts the documentation viewer into github.com repository pages and runs documentation requests in a background page context when zread.ai's bot protection blocks direct requests. |
-| tabs | permissions | Finds the repository tab to inject the viewer into, and manages a single off-screen background window used only when zread.ai temporarily blocks direct documentation requests. |
+| scripting | permissions | Inserts the documentation sidebar and doc renderer into github.com repository pages (the extension's only UI), and injects the bundled diagram renderer when a document contains a Mermaid diagram. All injected code ships inside the extension package; nothing is fetched or executed from the network. |
 | storage | permissions | Caches fetched documentation (table of contents and pages) on the device so documents open instantly and survive reloads. |
 | unlimitedStorage | permissions | The documentation cache can exceed the default 5 MB storage quota (capped at ~50 MB with automatic least-recently-used eviction). |
 | alarms | permissions | Schedules background pre-caching of a repository's documents so pre-fetching survives browser idle periods without keeping a page open. |
@@ -130,6 +129,7 @@ https://zread.ai
 
 | Version | Date | Changes | Status |
 |---------|------|---------|--------|
+| 0.1.9 | 2026-09-14 | No windows are opened in the background any more: the off-screen fetch fallback is gone. If zread.ai asks for a Cloudflare human check, a top-of-page notice offers a manual "Open zread.ai" (user click). Leftover background windows from earlier versions are closed automatically on startup; the `tabs` permission was dropped as unnecessary. |
 | 0.1.8 | 2026-09-14 | Background fetch window no longer leaks: the singleton lookup read `win.tabs` without `populate:true` (always undefined), so every fallback created a new hidden window and left it open; now reuses/adopts an existing one and automatically closes windows left by earlier versions |
 | 0.1.7 | 2026-09-13 | Off-screen fallback window no longer crashes with "Invalid value for bounds" on newer Chrome (bounds must be ≥50% on-screen): creation now falls back off-screen → minimized → default position |
 | 0.1.6 | 2026-09-12 | Docs language actually follows the browser language: zread localizes by the X-Locale cookie (not just the header), so a stale cookie kept forcing Chinese — the extension now syncs that cookie to the current language before every request; polluted cache purged via cache-key bump |

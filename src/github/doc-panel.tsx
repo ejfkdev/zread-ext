@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react'
 import { t, tEta, detectLocale } from './i18n'
+import { showVerifyBar, hideVerifyBar } from './verify-bar'
 
 export interface DocOutlineItem {
   title: string
@@ -164,6 +165,7 @@ export default function DocPanel({ repo, onDocClick }: DocPanelProps) {
         }
 
         if (response?.outline) {
+          hideVerifyBar()
           setOutline(response.outline)
           // 目录就绪后，通知后台按顺序预取并缓存各文档
           const slugs = [...response.outline]
@@ -174,6 +176,7 @@ export default function DocPanel({ repo, onDocClick }: DocPanelProps) {
       } catch (err) {
         if (err instanceof Error && err.message === 'CF_CHALLENGE') {
           setCfChallenge(true)
+          showVerifyBar()
         } else {
           setError(err instanceof Error ? err.message : 'Failed to load docs')
         }

@@ -5,7 +5,7 @@
 import { detectLocale } from './github/i18n';
 
 // 版本标记：每次发布改这里，控制台可确认扩展是否真的重载了新代码
-const EXT_VERSION = '0.1.8';
+const EXT_VERSION = '0.1.9';
 console.log('[zread-ext] background service worker started, version', EXT_VERSION);
 
 // 缓存键带语言前缀，避免中英文缓存互串
@@ -164,14 +164,8 @@ function isChallengeStatus(s: number): boolean {
   return s === 403 || s === 429 || s === 503;
 }
 
-// ==========================================
-// 同站代理：绝不创建用户可见的标签页
-// 后台直连被 Cloudflare 拦截时，把请求交给一个"屏幕外窗口"里的 zread.ai 页面：
-// 该窗口 left/top 设为 -32000（完全在可见屏幕之外）、不抢焦点，对用户不可见，
-// 但它是 zread.ai 的顶层浏览上下文，其中的同源 fetch 自动携带全部 cookie
-// （含 SW 读不到的分区 cf_clearance）——这是不产生可见标签页的唯一可行载体
-// （cookie 只在 zread.ai 为顶层站点时发送，iframe/扩展页/GitHub 页注入均不可行，已实测）。
-// 窗口 id 存 session storage，SW 重启后复用；全部被真人机挑战拦截 => CfChallengeError。
+// 直接请求 zread.ai（service worker 内 fetch）。被 Cloudflare 拦截时不再自动开任何窗口：
+// 由界面提示用户手动打开一次 zread.ai 完成人机验证，之后分区 cf_clearance 生效、直连恢复。
 // ==========================================
 interface ZreadResponse {
   status: number;
@@ -191,213 +185,41 @@ function b64ToBytes(b64: string): Uint8Array {
   return bytes;
 }
 
-const PROXY_FETCH_FILE = 'github/proxy-fetch.js';
-const proxyInjected = new Set<number>();
-
-// 向代理页注入主世界 fetch 助手（幂等：__zreadProxyFetch 已存在则跳过）
-async function injectProxyFetcher(tabId: number): Promise<boolean> {
-  try {
-    const probe = await chrome.scripting.executeScript({
-      target: { tabId, allFrames: false },
-      world: 'MAIN',
-      func: () => typeof (globalThis as any).__zreadProxyFetch === 'function',
-    });
-    if (probe?.[0]?.result) {
-      proxyInjected.add(tabId);
-      return true;
-    }
-    await chrome.scripting.executeScript({
-      target: { tabId, allFrames: false },
-      world: 'MAIN',
-      files: [PROXY_FETCH_FILE],
-    });
-    proxyInjected.add(tabId);
-    return true;
-  } catch (e) {
-    console.log('[zread-ext] inject proxy fetcher failed for tab', tabId, String(e));
-    return false;
-  }
-}
-
-// 屏幕外代理窗口单例：id 存 session storage，SW 重启后复用同一个窗口
-const PROXY_WINDOW_KEY = 'proxyWindowId';
-let proxyWindowCreating: Promise<chrome.windows.Window | null> | null = null;
-
-// 代理窗口"形状"判定：扩展自己创建的窗口 = 单个 zread.ai 首页标签页 + 我们设定的尺寸/最小化状态。
-// 用户自己开的 zread.ai 窗口不会被误判（尺寸不同、标签页 URL 不是首页、或在焦点上）。
-function isProxyWindowShape(w: chrome.windows.Window): boolean {
+// ==========================================
+// 历史遗留清理：0.1.8 及更早版本因"单例复用"bug 泄漏过一批屏幕外 zread.ai 窗口。
+// 本版本不再创建任何窗口（人机验证由页面顶部提示条引导用户手动打开一次），
+// 但保留一次性清理：SW 启动时顺带关掉这些遗留窗口，避免一直堆在后台。
+// 判定保守（绝不误关用户自己的窗口）：单标签页 + URL 恰为 zread.ai 首页 + 最小化或 ≤900×700 + 非焦点窗口。
+// ==========================================
+function looksLikeLeakedProxyWindow(w: chrome.windows.Window): boolean {
   if (w.focused) return false;
   if (!w.tabs || w.tabs.length !== 1) return false;
   const url = w.tabs[0]?.url || '';
   if (!url.startsWith('https://zread.ai/')) return false;
-  if (url.replace('https://zread.ai/', '').includes('/')) return false; // 只认首页，用户浏览文档页不算
+  if (url.replace('https://zread.ai/', '').includes('/')) return false; // 只看首页，用户浏览文档页不算
   if (w.state === 'minimized') return true;
   const width = w.width ?? 0;
   const height = w.height ?? 0;
   return width > 0 && height > 0 && width <= 900 && height <= 700;
 }
 
-// 清理代理窗口：保留 keepWindowId（未指定则保留第一个匹配项），关掉其余历史泄漏窗口。
-// 返回保留下来的窗口 { windowId, tabId }（没有则为 null）。
-async function pruneProxyWindows(
-  keepWindowId?: number
-): Promise<{ windowId: number; tabId: number } | null> {
+async function closeLeakedProxyWindows(): Promise<void> {
   try {
     const wins = await chrome.windows.getAll({ populate: true, windowTypes: ['normal'] });
-    const mine = wins.filter(isProxyWindowShape);
-    if (!mine.length) return null;
-    const keep = (keepWindowId != null && mine.find((w) => w.id === keepWindowId)) || mine[0];
-    for (const w of mine) {
-      if (w.id == null || w.id === keep.id) continue;
+    for (const w of wins) {
+      if (w.id == null || !looksLikeLeakedProxyWindow(w)) continue;
       try {
         await chrome.windows.remove(w.id);
-        console.log('[zread-ext] pruned leaked proxy window', w.id);
-      } catch (e) {
-        console.log('[zread-ext] prune remove failed:', String(e));
-      }
+        console.log('[zread-ext] closed leftover background window', w.id);
+      } catch {}
     }
-    const tabId = keep.tabs?.[0]?.id;
-    if (keep.id == null || tabId == null) return null;
-    return { windowId: keep.id, tabId };
   } catch (e) {
-    console.log('[zread-ext] prune proxy windows failed:', String(e));
-    return null;
+    console.log('[zread-ext] cleanup of leftover windows failed:', String(e));
   }
 }
 
-// SW 每次启动清理一次泄漏窗口（保留 session storage 记录的那个）
-void (async () => {
-  const saved = await sessionGet<number>(PROXY_WINDOW_KEY);
-  await pruneProxyWindows(saved ?? undefined);
-})();
-
-async function ensureProxyWindow(): Promise<number | null> {
-  const saved = await sessionGet<number>(PROXY_WINDOW_KEY);
-  if (saved != null) {
-    try {
-      // populate:true 必须带上：否则 win.tabs 恒为 undefined，复用判断永远失败 → 每次新建窗口（历史泄漏根因）
-      const win = await chrome.windows.get(saved, { populate: true, windowTypes: ['normal'] });
-      const tab = win.tabs?.[0];
-      if (tab?.id != null && (tab.url || '').startsWith('https://zread.ai')) return tab.id;
-      // 该窗口还在但已不是我们的页面：清引用并关掉
-      await sessionRemove(PROXY_WINDOW_KEY);
-      if (win.id != null) await chrome.windows.remove(win.id).catch(() => {});
-    } catch {
-      await sessionRemove(PROXY_WINDOW_KEY);
-    }
-  }
-  // 没有可用记录：先看有没有可接管的既有窗口（同时会关掉多余的），没有再新建
-  const adopted = await pruneProxyWindows();
-  if (adopted) {
-    await sessionSet(PROXY_WINDOW_KEY, adopted.windowId);
-    console.log('[zread-ext] reused existing proxy window', adopted.windowId);
-    return adopted.tabId;
-  }
-  let creating = proxyWindowCreating;
-  if (!creating) {
-    creating = (async (): Promise<chrome.windows.Window | null> => {
-      // 屏幕外：用户看不见。新版 Chrome 校验 create 的 bounds"至少 50% 在可见屏幕内"，
-      // -32000 会被拒（Invalid value for bounds），故逐级回退：屏幕外 → 最小化 → 默认位置。
-      const attempts: chrome.windows.CreateData[] = [
-        { url: 'https://zread.ai/', focused: false, left: -32000, top: -32000, width: 800, height: 600 },
-        { url: 'https://zread.ai/', focused: false, state: 'minimized', width: 800, height: 600 },
-        { url: 'https://zread.ai/', focused: false, width: 800, height: 600 },
-      ];
-      let win: chrome.windows.Window | null = null;
-      for (const data of attempts) {
-        try {
-          win = (await chrome.windows.create(data)) ?? null;
-          if (win) break;
-        } catch (e) {
-          console.log('[zread-ext] proxy window create attempt failed:', String(e));
-        }
-      }
-      if (win && win.id != null) await sessionSet(PROXY_WINDOW_KEY, win.id);
-      return win;
-    })();
-    proxyWindowCreating = creating;
-    void creating
-      .catch(() => {})
-      .finally(() => {
-        proxyWindowCreating = null;
-      });
-  }
-  const win = await creating;
-  if (win?.id == null) return null;
-  // 新建成功后顺手清掉其它泄漏窗口，只留这一个
-  void pruneProxyWindows(win.id);
-  // 等页面加载稳定（Cloudflare 放行）
-  for (let i = 0; i < 20; i++) {
-    await new Promise((r) => setTimeout(r, 500));
-    try {
-      const w = await chrome.windows.get(win.id, { populate: true, windowTypes: ['normal'] });
-      const tab = w.tabs?.[0];
-      const title = (tab?.title || '').toLowerCase();
-      if (title && !/just a moment|checking|attention required/.test(title)) return tab?.id ?? null;
-    } catch {
-      return null;
-    }
-  }
-  const w = await chrome.windows
-    .get(win.id, { populate: true, windowTypes: ['normal'] })
-    .catch(() => null);
-  return w?.tabs?.[0]?.id ?? null;
-}
-
-// 代理窗口被关闭时清掉引用，下次需要时重建
-chrome.windows.onRemoved.addListener((windowId) => {
-  void (async () => {
-    if (windowId === (await sessionGet<number>(PROXY_WINDOW_KEY))) await sessionRemove(PROXY_WINDOW_KEY);
-  })();
-});
-
-// 在代理页主世界里发同源 fetch（浏览器自动带全部 cookie）
-async function zreadFetchInProxyPage(
-  tabId: number,
-  url: string,
-  init: { method?: string; headers?: Record<string, string>; body?: string; asBytes?: boolean } = {}
-): Promise<ZreadResponse> {
-  if (!proxyInjected.has(tabId)) {
-    const ok = await injectProxyFetcher(tabId);
-    if (!ok) throw new Error('proxy fetcher not available');
-  }
-  const method = init.method || 'GET';
-  const headers = init.headers || {};
-  const body = init.body ?? null;
-  const asBytes = init.asBytes === true;
-  const results = await chrome.scripting.executeScript({
-    target: { tabId, allFrames: false },
-    world: 'MAIN',
-    func: (u: string, m: string, h: Record<string, string>, b: string | null, wantBytes: boolean) =>
-      (globalThis as any).__zreadProxyFetch(u, m, h, b, wantBytes),
-    args: [url, method, headers, body, asBytes],
-  });
-  const r = results?.[0]?.result as ZreadResponse | undefined;
-  console.log('[zread-ext] proxy fetch in offscreen page, tab', tabId, ': status', r?.status, '->', url);
-  if (!r) {
-    proxyInjected.delete(tabId); // 页面可能导航过，下次重新注入
-    throw new Error('proxy page returned no result');
-  }
-  if (r.status === 0) proxyInjected.delete(tabId);
-  return r;
-}
-
-// 代理响应是否"可用"：2xx 且正文不是挑战页、来源页不是错误页
-function pageResultUsable(r: ZreadResponse): boolean {
-  if (r.status < 200 || r.status >= 300) return false;
-  if (isCfChallengeText(r.text)) return false;
-  if (isChallengeTitle(r.pageTitle || '')) return false;
-  const title = (r.pageTitle || '').toLowerCase();
-  if (/504|503|502|gateway/.test(title)) return false;
-  return true;
-}
-
-// 代理响应是否为"真人机挑战"（用于决定是否提示用户过验证）
-function pageResultIsChallenge(r: ZreadResponse): boolean {
-  if (isCfChallengeText(r.text)) return true;
-  if (isChallengeTitle(r.pageTitle || '')) return true;
-  return isChallengeStatus(r.status) && isCfChallengeText(r.text);
-}
+// SW 每次启动清理一次历史遗留窗口（本版本不会创建新窗口）
+void closeLeakedProxyWindows();
 
 // ==========================================
 // 后台直连请求（service worker 内 fetch，带普通 cookie）
@@ -442,9 +264,9 @@ function directUsable(r: ZreadResponse, url: string, isRsc = false): boolean {
 }
 
 // ==========================================
-// 智能请求：优先后台直连，遇到网络异常 / Cloudflare 拦截时
-// 降级到 zread.ai 页面代理（页面同站请求会自动带分区 cf_clearance）。
-// 若页面代理仍被挑战页拦截 => 抛出 CfChallengeError（提示用户去过人机验证）。
+// 请求 zread.ai：只走后台直连。
+// 被 Cloudflare 挡住时抛 CfChallengeError，由界面提示用户手动打开一次 zread.ai 完成验证
+// （验证后分区 cf_clearance 可读，直连即恢复）——不自动创建任何窗口或标签页。
 // ==========================================
 async function zreadFetchSmart(
   url: string,
@@ -452,81 +274,21 @@ async function zreadFetchSmart(
 ): Promise<ZreadResponse> {
   const { token, locale, cookieHeader } = await getZreadAuth();
 
-  // —— 1) 后台直连 ——
-  const directHeaders = buildHeaders(token, locale, init.headers);
-  if (cookieHeader) directHeaders['Cookie'] = cookieHeader;
+  const headers = buildHeaders(token, locale, init.headers);
+  if (cookieHeader) headers['Cookie'] = cookieHeader;
   const isRsc = !!(init.headers && (init.headers['RSC'] || init.headers['rsc']));
-  const direct = await directFetch(url, { ...init, headers: directHeaders });
+  const res = await directFetch(url, { ...init, headers });
 
-  if (directUsable(direct, url, isRsc)) {
-    console.log('[zread-ext] direct OK', direct.status, url);
-    return direct;
+  if (directUsable(res, url, isRsc)) {
+    console.log('[zread-ext] direct OK', res.status, url);
+    return res;
   }
-  console.log(
-    `[zread-ext] direct blocked/failed (status=${direct.status}, challengeText=${isCfChallengeText(direct.text)}), falling back to page proxy:`,
-    url
-  );
-
-  // —— 2) 同站代理：屏幕外窗口里的 zread.ai 页面（对用户不可见） ——
-  const pageHeaders = buildHeaders(token, locale, init.headers);
-
-  const attemptProxy = async (): Promise<{ ok: ZreadResponse | null; last: ZreadResponse | null; sawChallenge: boolean }> => {
-    let last: ZreadResponse | null = null;
-    let sawChallenge = false;
-    const note = (r: ZreadResponse | null): ZreadResponse | null => {
-      if (r) {
-        last = r;
-        if (pageResultIsChallenge(r)) sawChallenge = true;
-      }
-      return r && pageResultUsable(r) ? r : null;
-    };
-
-    const tabId = await ensureProxyWindow();
-    if (tabId == null) return { ok: null, last, sawChallenge };
-
-    const run = async (): Promise<ZreadResponse | null> => {
-      try {
-        return await zreadFetchInProxyPage(tabId, url, { ...init, headers: pageHeaders });
-      } catch (e) {
-        console.log('[zread-ext] proxy fetch in offscreen page threw:', String(e));
-        return null;
-      }
-    };
-
-    const ok = note(await run());
-    if (ok) {
-      console.log('[zread-ext] proxy OK via offscreen page', url);
-      return { ok, last, sawChallenge };
-    }
-    // 瞬时 504/502（非真人机挑战）延迟重试一次
-    const lastOnce = last as ZreadResponse | null;
-    if (lastOnce && lastOnce.status !== 0 && !sawChallenge) {
-      await new Promise((r) => setTimeout(r, 1200));
-      const retry = note(await run());
-      if (retry) {
-        console.log('[zread-ext] proxy OK via delayed retry (offscreen page)', url);
-        return { ok: retry, last, sawChallenge };
-      }
-    }
-    return { ok: null, last, sawChallenge };
-  };
-
-  let result = await attemptProxy();
-
-  // 网络层异常（status 0，如页面导航）时，整体重跑一次
-  if (!result.ok && result.last?.status === 0 && !result.sawChallenge) {
-    console.log('[zread-ext] network-level failure (status 0), re-running proxy once');
-    await new Promise((r) => setTimeout(r, 800));
-    result = await attemptProxy();
-  }
-
-  // —— 3) 都不行：真人机挑战才提示用户；否则报普通错误 ——
-  if (result.ok) return result.ok;
-  if (result.sawChallenge || (result.last && pageResultIsChallenge(result.last))) {
-    console.log('[zread-ext] proxy hit a real Cloudflare challenge');
+  // 真人机挑战：交给 UI 提示用户手动过一次；网关错误等按普通失败上报
+  if (isCfChallengeText(res.text) || isChallengeTitle(res.pageTitle || '') || (isChallengeStatus(res.status) && isCfChallengeText(res.text))) {
+    console.log('[zread-ext] direct hit a Cloudflare challenge (status', res.status, '):', url);
     throw new CfChallengeError();
   }
-  throw new Error(`proxy failed (last status ${result.last?.status})`);
+  throw new Error(`request failed (status ${res.status})`);
 }
 
 // 构造业务请求头（token + locale）；Cookie 由浏览器自动携带

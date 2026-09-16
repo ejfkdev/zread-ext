@@ -8,6 +8,7 @@ import { findReadmeBox, findReadmeContainer, isGitHubRepoPage } from './integrat
 import DocPanel from './doc-panel'
 import { buildPageToc, removePageToc } from './page-toc'
 import { t, detectLocale } from './i18n'
+import { showVerifyBar, hideVerifyBar } from './verify-bar'
 
 let docPanelRoot: Root | null = null
 let docPanelContainer: HTMLElement | null = null
@@ -578,11 +579,13 @@ async function loadDoc(slug: string) {
     // 给代码块添加复制按钮（仿 GitHub 原生风格）
     addCodeCopyButtons(container)
 
+    hideVerifyBar()
     // 页内目录（右侧进度轨 + 悬停卡片）
     buildPageToc(container)
   } catch (err) {
     console.error('[zread-ext] loadDoc error:', err)
     if (err instanceof Error && err.message === 'CF_CHALLENGE') {
+      showVerifyBar()
       container.innerHTML =
         `<div class="zread-readme-loading" style="color:#656d76">` +
         `${t('cfShort')}<br><br>` +
@@ -914,6 +917,7 @@ const GitHubUI = {
   },
 
   cleanup() {
+    hideVerifyBar()
     removePageToc()
     if (mutationObserver) {
       mutationObserver.disconnect()
