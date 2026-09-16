@@ -23,7 +23,7 @@
 - 🧩 **代码复制**：为渲染的代码块添加仿 GitHub 的复制按钮。
 - 📊 **Mermaid 图表**：渲染流程图，支持全屏预览（缩放/拖动/重置），按需分包加载；语法错误的图表回退显示源码。
 - 🧭 **页内导航**：文档右侧进度轨 + 悬停目录卡片，跟随滚动、点击跳转章节。
-- 🕶️ **无打扰**：全程不自动创建任何窗口/标签页；zread.ai 触发人机验证时在页面顶部弹出提示条，由你手动打开一次 zread.ai 完成验证。
+- 🕶️ **无打扰**：全程不自动创建任何窗口/标签页；zread.ai 触发人机验证时在左侧文档面板给出提示，由你手动打开一次 zread.ai 完成验证。
 - 🔒 **隐私**：只与 github.com / zread.ai 通信，无统计无追踪，见 [隐私政策](PRIVACY.md)。
 - 🌙 **暗色模式**：跟随系统 `prefers-color-scheme`。
 - 🌐 **国际化**：浏览器为中文时显示中文，否则英文（界面与内容均跟随）。
@@ -47,7 +47,7 @@ bun run build    # 构建到 dist/chromium
 ## 🧩 原理简述
 
 - **Content script**：在 GitHub 仓库页注入左侧目录，复用 README 容器渲染文档。
-- **Service worker**：请求 zread.ai（目录/正文/状态/ETA）；直连优先（携带 Cloudflare 许可 cookie），必要时以屏幕外窗口兜底；管理缓存与预取。
+- **Service worker**：请求 zread.ai（目录/正文/状态/ETA）；直连优先（携带 Cloudflare 许可 cookie）；被 Cloudflare 拦截时在左侧面板提示手动验证；管理缓存与预取。
 - **Mermaid**：单独打包，仅在检测到图表时按需注入，控制主包体积。
 
 ## 🤝 贡献
@@ -80,7 +80,7 @@ Read [zread.ai](https://zread.ai) AI-generated documentation right on any GitHub
 - 🧩 **Copy code**: GitHub-style copy button on rendered code blocks.
 - 📊 **Mermaid**: renders diagrams with a fullscreen viewer (zoom/pan/reset), loaded on demand; syntax-broken diagrams fall back to source code.
 - 🧭 **In-page navigation**: section progress rail + hover table-of-contents card on the right, scroll-aware with click-to-jump.
-- 🕶️ **Unobtrusive**: never opens windows or tabs on its own; when zread.ai asks for a Cloudflare human check, a top-of-page notice lets you open zread.ai manually once.
+- 🕶️ **Unobtrusive**: never opens windows or tabs on its own; when zread.ai asks for a Cloudflare human check, the documentation panel shows a notice so you can open zread.ai manually once.
 - 🔒 **Privacy**: talks only to github.com / zread.ai, no analytics or tracking — see [Privacy Policy](PRIVACY.md).
 - 🌙 **Dark mode**: follows system `prefers-color-scheme`.
 - 🌐 **i18n**: Chinese only when the browser language is Chinese, otherwise English (UI + content).
@@ -104,7 +104,7 @@ bun run build    # builds to dist/chromium
 ## 🧩 How it works
 
 - **Content script**: injects the sidebar on GitHub repo pages and renders docs into the README container.
-- **Service worker**: fetches zread.ai (outline/content/status/ETA); direct-first (with the Cloudflare clearance cookie), off-screen window as last resort; manages cache & prefetch.
+- **Service worker**: fetches zread.ai (outline/content/status/ETA); direct-first (with the Cloudflare clearance cookie); if Cloudflare blocks it, the panel asks you to verify manually; manages cache & prefetch.
 - **Mermaid**: bundled separately and injected only when a diagram is present, keeping the main bundle small.
 
 ## 🤝 Contributing

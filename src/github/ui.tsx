@@ -8,7 +8,7 @@ import { findReadmeBox, findReadmeContainer, isGitHubRepoPage } from './integrat
 import DocPanel from './doc-panel'
 import { buildPageToc, removePageToc } from './page-toc'
 import { t, detectLocale } from './i18n'
-import { showVerifyBar, hideVerifyBar } from './verify-bar'
+import { raiseCfChallenge } from './cf-notice'
 
 let docPanelRoot: Root | null = null
 let docPanelContainer: HTMLElement | null = null
@@ -165,6 +165,12 @@ function injectStyles() {
       border-radius: 6px;
     }
     .zread-cf-open-btn:hover { background: #1a60d2; }
+    .zread-cf-actions { display: flex; gap: 8px; justify-content: center; margin-top: 6px; }
+    .zread-cf-actions .zread-cf-open-btn { margin-top: 0; }
+    .zread-cf-open-btn.zread-cf-secondary {
+      color: #1f6feb; background: transparent;
+    }
+    .zread-cf-open-btn.zread-cf-secondary:hover { background: rgba(31,111,235,.08); }
 
     .zread-readme-loading {
       padding: 40px; text-align: center; color: #656d76; font-size: 14px;
@@ -579,20 +585,14 @@ async function loadDoc(slug: string) {
     // 给代码块添加复制按钮（仿 GitHub 原生风格）
     addCodeCopyButtons(container)
 
-    hideVerifyBar()
     // 页内目录（右侧进度轨 + 悬停卡片）
     buildPageToc(container)
   } catch (err) {
     console.error('[zread-ext] loadDoc error:', err)
     if (err instanceof Error && err.message === 'CF_CHALLENGE') {
-      showVerifyBar()
-      container.innerHTML =
-        `<div class="zread-readme-loading" style="color:#656d76">` +
-        `${t('cfShort')}<br><br>` +
-        `<button class="zread-cf-open-btn">${t('cfBtn')}</button></div>`
-      container.querySelector('.zread-cf-open-btn')?.addEventListener('click', () => {
-        chrome.runtime.sendMessage({ type: 'zreadOpenSite' }, () => {})
-      })
+      // 提示统一放在左侧文档面板（含"打开 zread.ai"按钮），正文区只留一行说明
+      raiseCfChallenge()
+      container.innerHTML = `<div class="zread-readme-loading" style="color:#656d76">${t('cfLine1')}</div>`
     } else {
       container.innerHTML = `<div class="zread-readme-loading" style="color:#cf222e">${t('loadFail')}${escapeHtml(err instanceof Error ? err.message : 'Unknown error')}</div>`
     }
@@ -917,7 +917,6 @@ const GitHubUI = {
   },
 
   cleanup() {
-    hideVerifyBar()
     removePageToc()
     if (mutationObserver) {
       mutationObserver.disconnect()

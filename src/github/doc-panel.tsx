@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react'
 import { t, tEta, detectLocale } from './i18n'
-import { showVerifyBar, hideVerifyBar } from './verify-bar'
+import { onCfChallenge } from './cf-notice'
 
 export interface DocOutlineItem {
   title: string
@@ -165,7 +165,7 @@ export default function DocPanel({ repo, onDocClick }: DocPanelProps) {
         }
 
         if (response?.outline) {
-          hideVerifyBar()
+          setCfChallenge(false)
           setOutline(response.outline)
           // 目录就绪后，通知后台按顺序预取并缓存各文档
           const slugs = [...response.outline]
@@ -176,7 +176,6 @@ export default function DocPanel({ repo, onDocClick }: DocPanelProps) {
       } catch (err) {
         if (err instanceof Error && err.message === 'CF_CHALLENGE') {
           setCfChallenge(true)
-          showVerifyBar()
         } else {
           setError(err instanceof Error ? err.message : 'Failed to load docs')
         }
@@ -186,6 +185,9 @@ export default function DocPanel({ repo, onDocClick }: DocPanelProps) {
     }
     fetchOutline()
   }, [repo, retryTick])
+
+  // 正文（ui.tsx）加载遇到 Cloudflare 验证时，同样在左侧面板给出提示
+  useEffect(() => onCfChallenge(() => setCfChallenge(true)), [])
 
   const tree = useMemo(() => buildTree(outline), [outline])
 
@@ -256,12 +258,23 @@ export default function DocPanel({ repo, onDocClick }: DocPanelProps) {
         <div className="zread-sidebar-cf">
           <p>{t('cfLine1')}</p>
           <p>{t('cfLine2')}</p>
-          <button
-            className="zread-cf-open-btn"
-            onClick={() => chrome.runtime.sendMessage({ type: 'zreadOpenSite' }, () => {})}
-          >
-            {t('cfBtn')}
-          </button>
+          <div className="zread-cf-actions">
+            <button
+              className="zread-cf-open-btn"
+              onClick={() => chrome.runtime.sendMessage({ type: 'zreadOpenSite' }, () => {})}
+            >
+              {t('cfBtn')}
+            </button>
+            <button
+              className="zread-cf-open-btn zread-cf-secondary"
+              onClick={() => {
+                setCfChallenge(false)
+                setRetryTick((v) => v + 1)
+              }}
+            >
+              {t('retry')}
+            </button>
+          </div>
         </div>
       </div>
     )
