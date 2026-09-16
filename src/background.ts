@@ -5,7 +5,7 @@
 import { detectLocale } from './github/i18n';
 
 // 版本标记：每次发布改这里，控制台可确认扩展是否真的重载了新代码
-const EXT_VERSION = '0.1.7';
+const EXT_VERSION = '0.1.8';
 console.log('[zread-ext] background service worker started, version', EXT_VERSION);
 
 // 缓存键带语言前缀，避免中英文缓存互串
@@ -223,16 +223,75 @@ async function injectProxyFetcher(tabId: number): Promise<boolean> {
 const PROXY_WINDOW_KEY = 'proxyWindowId';
 let proxyWindowCreating: Promise<chrome.windows.Window | null> | null = null;
 
+// 代理窗口"形状"判定：扩展自己创建的窗口 = 单个 zread.ai 首页标签页 + 我们设定的尺寸/最小化状态。
+// 用户自己开的 zread.ai 窗口不会被误判（尺寸不同、标签页 URL 不是首页、或在焦点上）。
+function isProxyWindowShape(w: chrome.windows.Window): boolean {
+  if (w.focused) return false;
+  if (!w.tabs || w.tabs.length !== 1) return false;
+  const url = w.tabs[0]?.url || '';
+  if (!url.startsWith('https://zread.ai/')) return false;
+  if (url.replace('https://zread.ai/', '').includes('/')) return false; // 只认首页，用户浏览文档页不算
+  if (w.state === 'minimized') return true;
+  const width = w.width ?? 0;
+  const height = w.height ?? 0;
+  return width > 0 && height > 0 && width <= 900 && height <= 700;
+}
+
+// 清理代理窗口：保留 keepWindowId（未指定则保留第一个匹配项），关掉其余历史泄漏窗口。
+// 返回保留下来的窗口 { windowId, tabId }（没有则为 null）。
+async function pruneProxyWindows(
+  keepWindowId?: number
+): Promise<{ windowId: number; tabId: number } | null> {
+  try {
+    const wins = await chrome.windows.getAll({ populate: true, windowTypes: ['normal'] });
+    const mine = wins.filter(isProxyWindowShape);
+    if (!mine.length) return null;
+    const keep = (keepWindowId != null && mine.find((w) => w.id === keepWindowId)) || mine[0];
+    for (const w of mine) {
+      if (w.id == null || w.id === keep.id) continue;
+      try {
+        await chrome.windows.remove(w.id);
+        console.log('[zread-ext] pruned leaked proxy window', w.id);
+      } catch (e) {
+        console.log('[zread-ext] prune remove failed:', String(e));
+      }
+    }
+    const tabId = keep.tabs?.[0]?.id;
+    if (keep.id == null || tabId == null) return null;
+    return { windowId: keep.id, tabId };
+  } catch (e) {
+    console.log('[zread-ext] prune proxy windows failed:', String(e));
+    return null;
+  }
+}
+
+// SW 每次启动清理一次泄漏窗口（保留 session storage 记录的那个）
+void (async () => {
+  const saved = await sessionGet<number>(PROXY_WINDOW_KEY);
+  await pruneProxyWindows(saved ?? undefined);
+})();
+
 async function ensureProxyWindow(): Promise<number | null> {
   const saved = await sessionGet<number>(PROXY_WINDOW_KEY);
   if (saved != null) {
     try {
-      const win = await chrome.windows.get(saved, { windowTypes: ['normal'] });
-      const [tab] = win.tabs || [];
-      if (tab?.id != null) return tab.id;
+      // populate:true 必须带上：否则 win.tabs 恒为 undefined，复用判断永远失败 → 每次新建窗口（历史泄漏根因）
+      const win = await chrome.windows.get(saved, { populate: true, windowTypes: ['normal'] });
+      const tab = win.tabs?.[0];
+      if (tab?.id != null && (tab.url || '').startsWith('https://zread.ai')) return tab.id;
+      // 该窗口还在但已不是我们的页面：清引用并关掉
+      await sessionRemove(PROXY_WINDOW_KEY);
+      if (win.id != null) await chrome.windows.remove(win.id).catch(() => {});
     } catch {
       await sessionRemove(PROXY_WINDOW_KEY);
     }
+  }
+  // 没有可用记录：先看有没有可接管的既有窗口（同时会关掉多余的），没有再新建
+  const adopted = await pruneProxyWindows();
+  if (adopted) {
+    await sessionSet(PROXY_WINDOW_KEY, adopted.windowId);
+    console.log('[zread-ext] reused existing proxy window', adopted.windowId);
+    return adopted.tabId;
   }
   let creating = proxyWindowCreating;
   if (!creating) {
@@ -265,19 +324,23 @@ async function ensureProxyWindow(): Promise<number | null> {
   }
   const win = await creating;
   if (win?.id == null) return null;
+  // 新建成功后顺手清掉其它泄漏窗口，只留这一个
+  void pruneProxyWindows(win.id);
   // 等页面加载稳定（Cloudflare 放行）
   for (let i = 0; i < 20; i++) {
     await new Promise((r) => setTimeout(r, 500));
     try {
-      const w = await chrome.windows.get(win.id, { windowTypes: ['normal'] });
-      const [tab] = w.tabs || [];
+      const w = await chrome.windows.get(win.id, { populate: true, windowTypes: ['normal'] });
+      const tab = w.tabs?.[0];
       const title = (tab?.title || '').toLowerCase();
       if (title && !/just a moment|checking|attention required/.test(title)) return tab?.id ?? null;
     } catch {
       return null;
     }
   }
-  const w = await chrome.windows.get(win.id, { windowTypes: ['normal'] }).catch(() => null);
+  const w = await chrome.windows
+    .get(win.id, { populate: true, windowTypes: ['normal'] })
+    .catch(() => null);
   return w?.tabs?.[0]?.id ?? null;
 }
 

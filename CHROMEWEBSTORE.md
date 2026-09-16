@@ -130,6 +130,7 @@ https://zread.ai
 
 | Version | Date | Changes | Status |
 |---------|------|---------|--------|
+| 0.1.8 | 2026-09-14 | Background fetch window no longer leaks: the singleton lookup read `win.tabs` without `populate:true` (always undefined), so every fallback created a new hidden window and left it open; now reuses/adopts an existing one and automatically closes windows left by earlier versions |
 | 0.1.7 | 2026-09-13 | Off-screen fallback window no longer crashes with "Invalid value for bounds" on newer Chrome (bounds must be ≥50% on-screen): creation now falls back off-screen → minimized → default position |
 | 0.1.6 | 2026-09-12 | Docs language actually follows the browser language: zread localizes by the X-Locale cookie (not just the header), so a stale cookie kept forcing Chinese — the extension now syncs that cookie to the current language before every request; polluted cache purged via cache-key bump |
 | 0.1.5 | 2026-09-12 | Language switch no longer shows stale cached docs: content locale is reported by the page (web-language aware) instead of the worker's UI language, so cache keys and X-Locale follow the browser's current language |
