@@ -119,3 +119,7 @@ Issues and PRs are welcome; please open an issue first for major changes.
 ## 📄 License
 
 [MIT](LICENSE) © 2026 ejfkdev
+
+<div align="center">
+<sub><a href="#zread-docs-for-github">简体中文</a> · 友情链接 https://linux.do </sub>
+</div>
